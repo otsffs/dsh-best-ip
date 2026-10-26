@@ -21,6 +21,7 @@ export function verifyManifest(manifest) {
   assert.equal(manifest.publishConfig?.access, 'public')
   assert.equal(manifest.publishConfig?.registry, 'https://registry.npmjs.org/')
   assert.ok(manifest.engines?.node && manifest.engines?.dsh, 'declare Node and DSH compatibility')
+  assert.equal(manifest.engines.dsh, '>=0.2.1-rc.1', 'keep the agreed minimum DSH version and no upper bound')
   assert.equal(manifest.main, 'index.js')
   assert.equal(manifest.exports?.['.'], './index.js')
   assert.equal(manifest.exports?.['./client'], './client.js')

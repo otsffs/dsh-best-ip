@@ -1,6 +1,7 @@
 // Pure release contracts: no npm install/publish or live DSH is involved.
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import { createRequire } from 'node:module'
 import test from 'node:test'
 import { RELEASE_FILES, verifyManifest, verifyReleaseFiles, privacyIssues } from '../scripts/check-package.mjs'
 
@@ -11,6 +12,24 @@ test('manifest is a public MIT DSH bundle with ready-to-load server/client artif
   assert.match(fs.readFileSync(new URL('../LICENSE', import.meta.url), 'utf8'), /^MIT License/)
   for (const file of RELEASE_FILES) assert.ok(fs.statSync(new URL(`../${file}`, import.meta.url)).isFile(), file)
   assert.equal(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-connection'), false)
+})
+
+test('DSH compatibility starts at rc.1 and imposes no future-version ceiling', () => {
+  assert.equal(manifest.engines.dsh, '>=0.2.1-rc.1')
+  const readme = fs.readFileSync(new URL('../README.md', import.meta.url), 'utf8')
+  assert.ok(readme.includes('`>=0.2.1-rc.1`'))
+})
+
+test('DSH prerelease boundaries accept rc.1/rc.2 and newer hosts but reject older releases', { skip: !process.env.npm_execpath }, () => {
+  // npm already supplies semver; use its real comparator instead of inventing
+  // a test-only version parser or adding a production dependency.
+  const semver = createRequire(process.env.npm_execpath)('semver')
+  for (const version of ['0.2.1-rc.1', '0.2.1-rc.2', '0.2.1-rc.3', '0.2.1-rc.10', '0.2.1', '0.2.2', '0.3.0', '1.0.0']) {
+    assert.equal(semver.satisfies(version, manifest.engines.dsh, { includePrerelease: true }), true, version)
+  }
+  for (const version of ['0.2.0', '0.2.1-alpha.9', '0.2.1-beta.9', '0.2.1-rc.0']) {
+    assert.equal(semver.satisfies(version, manifest.engines.dsh, { includePrerelease: true }), false, version)
+  }
 })
 
 test('publication guard rejects private packages, wrong bundle entries and install-time hooks', () => {

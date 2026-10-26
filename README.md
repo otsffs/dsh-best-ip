@@ -6,7 +6,7 @@ Benchmark the current DSH default model's API IPs. Testing recommends an address
 
 ## 安装
 
-需要带有插件管理器、默认模型、Settings、凭据和 Web 服务的 DSH。当前兼容声明为 `^0.2.1-rc.3`；Node.js 要求 `>=22`，无需单独安装运行时依赖。仅支持使用 API Key 的默认供应商，暂不支持 OAuth 或其他模型适配器。
+需要带有插件管理器、默认模型、Settings、凭据和 Web 服务的 DSH。当前兼容声明为 `>=0.2.1-rc.1`，包含 rc.1、rc.2、rc.3 及后续版本，不设版本上限；这只是安装版本范围，不代表所有后续版本都已实测兼容。Node.js 要求 `>=22`，无需单独安装运行时依赖。仅支持使用 API Key 的默认供应商，暂不支持 OAuth 或其他模型适配器。
 
 ### 从 GitHub 安装
 

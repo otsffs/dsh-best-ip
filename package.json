@@ -1,6 +1,6 @@
 {
   "name": "dsh-best-ip",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": false,
   "type": "module",
   "description": "Benchmark the current default model API and pick the fastest, most stable resolved IP node, optionally applying it.",
@@ -17,7 +17,7 @@
   "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "dns", "benchmark"],
   "engines": {
     "node": ">=22",
-    "dsh": "^0.2.1-rc.3"
+    "dsh": ">=0.2.1-rc.1"
   },
   "publishConfig": {
     "access": "public",
