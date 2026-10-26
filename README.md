@@ -12,9 +12,28 @@ Benchmark the current DSH default model's API IPs. Testing recommends an address
 
 需要带有插件管理器、默认模型、Settings、凭据和 Web 服务的 DSH。当前兼容声明为 `>=0.2.1-rc.1`，包含 rc.1、rc.2、rc.3 及后续版本，不设版本上限；这只是安装版本范围，不代表所有后续版本都已实测兼容。Node.js 要求 `>=22`，无需单独安装运行时依赖。仅支持使用 API Key 的默认供应商，暂不支持 OAuth 或其他模型适配器。
 
+### 从 npm 安装（推荐）
+
+插件已发布到 npm，可直接按包名安装，无需克隆仓库：
+
+1. 在 DSH 侧栏打开 **插件 → 添加插件 / 安装第三方插件**。
+2. 在安装来源中填写包名：
+
+   ```text
+   dsh-best-ip
+   ```
+
+   需要固定版本时填写 `dsh-best-ip@1.1.1`。
+3. 确认信任该插件，点击 **安装**，随后选择 **立即启用**。
+4. 打开 **设置 → 模型节点优选**。
+
+包页面：https://www.npmjs.com/package/dsh-best-ip
+
+若你的 DSH 使用国内 npm 镜像且暂时提示找不到包，等待镜像同步，或手动触发 https://npmmirror.com/sync/dsh-best-ip 后再试。
+
 ### 从 GitHub 安装
 
-仓库推送完成且允许其他人读取后：
+适用于想跟随源码最新提交，或在插件尚未发布到 npm 时：
 
 1. 在 DSH 侧栏打开 **插件 → 添加插件 / 安装第三方插件**。
 2. 在安装来源中填写：
@@ -32,7 +51,7 @@ Benchmark the current DSH default model's API IPs. Testing recommends an address
 
 维护者运行 `npm pack` 生成 `.tgz` 后，可以将它作为 GitHub Release 附件分发。在同一个安装输入框中填写该包在 **DSH Host 上的绝对路径**；这不是浏览器文件上传。远程 Web 用户应使用服务器能读取的路径。
 
-发布到 npm 后，也可在安装输入框中填写 `dsh-best-ip@版本号`。GitHub/tgz 安装不要求先发布 npm；仅创建仓库或发布 npm 不会自动进入 DSH 的 Discover 列表，Discover 需要配置第三方插件索引。
+这三种方式都可以安装同一个插件，按名字或 tgz 安装不要求仓库可匿名读取。仅创建仓库或发布 npm 不会自动进入 DSH 的 Discover 列表，Discover 需要配置第三方插件索引。
 
 ## 使用
 

@@ -52,7 +52,10 @@ export function privacyIssues(source) {
   ]) {
     if (pattern.test(source)) issues.push(kind)
   }
-  const publicHosts = new Set(['github.com', 'registry.npmjs.org', 'www.cloudflare.com', 'www.w3.org'])
+  const publicHosts = new Set([
+    'github.com', 'raw.githubusercontent.com', 'registry.npmjs.org', 'www.npmjs.com',
+    'www.cloudflare.com', 'www.w3.org', 'npmmirror.com',
+  ])
   for (const match of source.matchAll(/https?:\/\/([a-z\d.-]+)(?=[/:\s'"`]|$)/gi)) {
     const host = match[1].toLowerCase()
     if (!publicHosts.has(host) && !host.endsWith('.test') && !host.endsWith('.invalid') && !host.endsWith('.example')) {
