@@ -1,0 +1,9 @@
+# Follow the installing profile's current DSH default provider/model.
+# No provider IDs, endpoints, credentials or saved measurements are bundled.
+# Other settings use the plugin schema/runtime defaults.
+- insert:
+    - id: dsh-best-ip
+      name: dsh-best-ip
+      config:
+        enabled: true
+        maxBenchmarkIps: 0  # 0 = all; a positive integer caps paid speed tests

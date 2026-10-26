@@ -1,0 +1,66 @@
+{
+  "name": "dsh-best-ip",
+  "version": "1.1.0",
+  "private": false,
+  "type": "module",
+  "description": "Benchmark the current default model API and pick the fastest, most stable resolved IP node, optionally applying it.",
+  "license": "MIT",
+  "author": "otsffs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/otsffs/dsh-best-ip.git"
+  },
+  "homepage": "https://github.com/otsffs/dsh-best-ip#readme",
+  "bugs": {
+    "url": "https://github.com/otsffs/dsh-best-ip/issues"
+  },
+  "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "dns", "benchmark"],
+  "engines": {
+    "node": ">=22",
+    "dsh": "^0.2.1-rc.3"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "check": "node --check index.js && node --check client.js && node --check providers.js && node --check bench.js && node --check probe.js && node --check store.js",
+    "test": "node --import ./test/no-network.js --test test/*.test.js",
+    "check:package": "node scripts/check-package.mjs",
+    "prepack": "npm run check && npm test && npm run check:package"
+  },
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "bench.js",
+    "probe.js",
+    "store.js",
+    "providers.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  }
+}

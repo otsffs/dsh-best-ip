@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Model Node Optimizer">
+  <defs>
+    <linearGradient id="dp-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#1d4ed8"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#dp-bg)"/>
+  <!-- Globe: the resolved endpoint -->
+  <circle cx="28" cy="26" r="14" fill="none" stroke="#ffffff" stroke-width="3"/>
+  <ellipse cx="28" cy="26" rx="6" ry="14" fill="none" stroke="#ffffff" stroke-width="2" opacity="0.85"/>
+  <path d="M14 26h28" fill="none" stroke="#ffffff" stroke-width="2" opacity="0.85"/>
+  <!-- Pin marker: the fixed resolver this host is bound to -->
+  <path d="M44 30c4.4 0 8 3.6 8 8 0 5.6-8 12-8 12s-8-6.4-8-12c0-4.4 3.6-8 8-8z" fill="#ffffff"/>
+  <circle cx="44" cy="38" r="3.2" fill="#1d4ed8"/>
+</svg>

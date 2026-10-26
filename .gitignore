@@ -1,0 +1,34 @@
+# Dependencies and generated release artifacts
+node_modules/
+dist/
+coverage/
+.cache/
+*.tgz
+*.log
+
+# Local credentials, environment and package-manager authentication
+.env
+.env.*
+!.env.example
+.npmrc
+.pnpmrc
+*.pem
+*.key
+.ssh/
+
+# DSH runtime/profile data must never enter this repository
+.dsh/
+profiles/
+dsh-best-ip/
+state.json
+state.json.lock
+state.json.*.tmp
+cordis.yml
+cordis.config.*
+cordis.patch.local.yml
+
+# Local editor/OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
