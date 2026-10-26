@@ -4,6 +4,10 @@
 
 Benchmark the current DSH default model's API IPs. Testing recommends an address; applying it is a separate, explicit action. No provider credentials or personal routes are bundled.
 
+## 界面预览
+
+![模型节点优选设置界面](<1.png>)
+
 ## 安装
 
 需要带有插件管理器、默认模型、Settings、凭据和 Web 服务的 DSH。当前兼容声明为 `>=0.2.1-rc.1`，包含 rc.1、rc.2、rc.3 及后续版本，不设版本上限；这只是安装版本范围，不代表所有后续版本都已实测兼容。Node.js 要求 `>=22`，无需单独安装运行时依赖。仅支持使用 API Key 的默认供应商，暂不支持 OAuth 或其他模型适配器。
@@ -72,7 +76,7 @@ Benchmark the current DSH default model's API IPs. Testing recommends an address
 - 测量结果在当前 profile 的 `dsh-best-ip/state.json` 中；未使用 profile 时保存到 DSH home。记录仍含域名、IP、模型及测量信息，请勿公开上传运行记录或凭据。
 - [.gitignore](<.gitignore>) 排除环境文件、凭据、运行状态、日志和生成包；[package.json](<package.json>) 的发布白名单只包含运行时文件、界面资源、安装层、说明和许可。测试和开发脚本不随安装包分发。
 
-## 开发与发布
+## 开发与检查
 
 从源码目录执行，无需 `npm install`：
 
@@ -87,14 +91,6 @@ npm pack
 - `check:package` 离线执行 `npm pack --dry-run --ignore-scripts`，核对完整的发布文件白名单和通用隐私规则；它不安装、不上传、不发布。
 - `prepack` 会执行语法、测试和包检查。没有安装时脚本或构建步骤，Git/tgz 安装直接使用成品 JavaScript。
 - GitHub CI 在 Linux/Windows、Node 22/24 上配置了相同检查；本地静态/离线通过不等于已实际验证所有 DSH 版本或安装渠道。
-
-发布前请自行确认 Git 作者邮箱不会公开私人邮箱，提交并推送经过审核的代码，再创建对应版本 tag 和 GitHub Release。若希望支持 npm 包名安装，需要拥有该包名并登录有发布权限的 npm 账号后手动执行：
-
-```sh
-npm publish --access public
-```
-
-包名是否可注册以 npm 实际结果为准。更新版本号时，同时检查 tag 和发布包文件名；不要把环境配置、运行数据或鉴权 token 放进仓库、发行包或 issue。完整安全扫描仍不能由通用正则检查替代。
 
 ## 参考与许可
 
