@@ -5,8 +5,8 @@ import { createResolver, normalizeConfig } from '../index.js'
 
 const host = 'api.example.test'
 const provider = { provider: 'p1', baseURL: `https://${host}/custom/v1`, api: 'openai-completions' }
-const oldIp = '203.0.113.9'
 const a = '203.0.113.1', b = '203.0.113.2', c = '203.0.113.3', d = '203.0.113.4'
+const oldIp = a
 const candidate = (ip, rtt = 20, colo = 'HKG') => ({ ip, rtt, colo })
 const sample = (ip, tps) => ({ ip, status: 200, ttftMs: 100, totalMs: 1100,
   decodeMs: 1000, outputTokens: tps, usageReported: true, tps })
@@ -105,10 +105,10 @@ test('exceptions become per-address failures and do not abort other candidates',
 test('one-click discovery never installs an intermediate RTT winner', async () => {
   let release
   const gate = new Promise((resolve) => { release = resolve })
-  const h = harness({ measure: async ({ ip }) => { await gate; return sample(ip, 100) } })
+  const h = harness({ records: [record({ selected: b })], measure: async ({ ip }) => { await gate; return sample(ip, 100) } })
   const run = h.engine.autoOptimize(host, { ...h.options, testOnly: false })
   await new Promise((resolve) => setImmediate(resolve))
-  assert.equal(h.engine.activeAddressFor(host), oldIp)
+  assert.equal(h.engine.activeAddressFor(host), b, 'the lower-RTT candidate must not replace the current address during discovery')
   assert.equal(h.writes.length, 0, 'discovery must be job-local')
   assert.throws(() => h.engine.select(host, a, { provider, testOnly: false }), /running/)
   await assert.rejects(h.engine.benchmark(host, h.options), /already running/)
@@ -116,13 +116,16 @@ test('one-click discovery never installs an intermediate RTT winner', async () =
   release(); await run
 })
 
-test('failed optimization preserves old address even if it vanished from fresh candidates', async () => {
-  const h = harness({ measure: ({ ip }) => ({ ip, error: 'HTTP 429' }) })
+test('failed optimization measures and preserves the old address even if fresh DNS omits it', async () => {
+  const omittedIp = '203.0.113.9'
+  const h = harness({ records: [record({ selected: omittedIp })], measure: ({ ip }) => ({ ip, error: 'HTTP 429' }) })
   const result = await h.engine.autoOptimize(host, { ...h.options, testOnly: false })
-  assert.equal(result.selected, oldIp)
+  assert.equal(result.selected, omittedIp)
   assert.equal(result.benchmarkFailed, true)
-  assert.equal(h.engine.activeAddressFor(host), oldIp)
+  assert.equal(h.engine.activeAddressFor(host), omittedIp)
   assert.equal(Object.values(h.state().hosts)[0].benchmarks[a].failed, 3)
+  assert.equal(result.benchmarks[omittedIp].failed, 3)
+  assert.equal(h.requests.filter((request) => request.ip === omittedIp).length, 3)
 })
 
 test('missing credentials fail before discovery and do not mutate state', async () => {
@@ -174,12 +177,12 @@ test('a first-ever test cannot create an active pin, including after persistence
 })
 
 test('test current address with plugin disabled uses system baseline, not dormant pin', async () => {
-  const h = harness({ config: { enabled: false } })
+  const h = harness({ records: [record({ selected: b })], config: { enabled: false } })
   const result = await h.engine.timeSelected(host, h.options)
   assert.equal(result.ip, a)
   assert.ok(h.requests.every((request) => request.ip === a))
   assert.equal(h.writes.length, 0)
-  assert.equal(h.engine.selectedFor(host, provider), oldIp)
+  assert.equal(h.engine.selectedFor(host, provider), b)
 })
 
 test('manual apply requires explicit testOnly:false', () => {

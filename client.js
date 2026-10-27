@@ -31,7 +31,7 @@ window.__ModuleLoader__.load({
       autoApplyTitle: 'Apply the recommended address after successful testing. Keep the current address on failure.',
       speedTest: 'Automatic speed test',
       speedTestHint:
-        'Discover usable addresses, then test the lowest-ping IPs up to the selected limit (all by default), equally with 3 runs by default. Rank by conservative speed, variability and reliable sample rate.',
+        'Discover addresses, reserve one slot for the previously selected IP, then fill the remaining slots by lowest ping (all by default) over 3 rounds by default. Rank by capped harmonic speed, lower-quartile speed, actual success rate and measurement confidence; skipped requests do not count as failures.',
       maxBenchmarkIps: 'Maximum test IPs',
       benchmarkIpLimitAll: 'All',
       benchmarkIpLimitCustom: 'Custom',
@@ -42,7 +42,7 @@ window.__ModuleLoader__.load({
       benchmarkCostLimitSummary: '{count} IPs: up to about {compactTotalEn} tokens',
       benchmarkCostDetails: 'Token budget details',
       benchmarkCostHint: 'Budget for {count} usable IPs × {runs} runs/IP × up to {tokens} output tokens/run: about {total} output tokens, plus input tokens. Actual usage depends on usable IPs and output length.',
-      benchmarkCostAllHint: '“All” is estimated using the extra scan budget of {count} IPs. DNS answers are additional, so the actual IP count may be higher.',
+      benchmarkCostAllHint: '“All” is estimated using the extra scan budget of {count} IPs. DNS answers and a previously selected IP are additional to the scan budget, so the actual IP count may be higher.',
       stepProbe: 'Discovering addresses',
       stepBenchmark: 'Timing throughput',
       stepConfirm: 'Repeating measurements',
@@ -83,22 +83,45 @@ window.__ModuleLoader__.load({
       defaultChangedHint: 'The DSH default provider/model changed. Samples were saved, but no address was applied.',
       recommended: 'Recommended',
       systemDns: 'System DNS',
-      resultHint: 'Sorted by robust score. ⚠ flags questionable samples; raw values are retained. Fewer than 2 reliable samples cannot be recommended.',
-      score: 'Robust score',
-      scoreHint: 'Q25 / (1 + IQR / median) × reliable sample rate². Higher is better; this is a heuristic, not a confidence interval.',
+      resultHint: 'V2 scores rank first; provisional scores need at least 2 reliable samples for recommendation. ⚠ retains raw TPS: high values may be capped, not failed. Skipped nodes are eliminated; legacy records need a retest.',
+      score: 'Composite score',
+      scoreHint: '100 × (80% capped harmonic TPS + 20% capped Q25) / median node harmonic TPS × actual success rate² × measurement confidence. Confidence = reliable/successful requests × min(1, reliable runs/2). Unstarted, skipped and cancelled requests are not failures.',
+      provisional: 'Provisional',
+      confirmed: 'Confirmed',
+      eliminated: 'Eliminated / skipped',
+      legacyRecord: 'Legacy record; retest required',
+      incompleteRetest: 'Incomplete retest; this result is not confirmed.',
+      appliedIncompleteHint: 'Address applied manually before the full retest completed; this result is not confirmed.',
+      appliedLegacyHint: 'Address applied manually from a legacy record; retest with scoring v2 before relying on it.',
+      noRecommendationHint: 'Test complete. Not enough reliable evidence for a recommendation; current address unchanged.',
+      measured: 'tested',
+      skipped: 'skipped',
+      budget: 'planned',
+      round: 'Round',
+      leading: 'Provisional leader',
+      successfulSamples: 'successful',
+      failedSamples: 'failed',
+      measurementConfidence: 'Measurement confidence',
+      scoreUncalibrated: 'Provisional calibration',
+      scoreReference: 'Shared speed reference',
+      scoreCap: 'Shared speed cap',
+      scoreUncapped: 'not capped',
+      scoredTps: 'TPS used for scoring',
+      timeoutBudget: 'timeout budget',
       stop: 'Stop test',
       stopping: 'Stopping…',
       stopped: 'Stopped',
       stoppedHint: 'Stopped. Completed samples were saved; the current address was not changed.',
       stoppingHint: 'Cancelling active requests and saving completed samples…',
       sampleMissing: 'not tested',
+      sampleSkipped: 'skipped',
       sampleStopped: 'stopped',
       sampleFailed: 'failed',
       sampleUnmeasurable: 'unmeasurable',
       sampleLegacy: 'individual samples unavailable; retest',
       samplesInsufficient: 'insufficient reliable samples',
       reliableSamples: 'reliable',
-      sampleReasons: { 'transport-error': 'request failed', cancelled: 'cancelled', unmeasurable: 'invalid usage/timing', 'insufficient-tokens': 'fewer than 32 output tokens', 'missing-decode-window': 'missing decode duration', 'invalid-decode-window': 'invalid decode duration', 'insufficient-decode-window': 'decode window below 200 ms', 'high-outlier': 'over 4× typical TPS; excluded from scoring', 'low-tail': 'slow sample retained in scoring' },
+      sampleReasons: { 'transport-error': 'request failed', cancelled: 'cancelled', unmeasurable: 'invalid usage/timing', 'insufficient-tokens': 'fewer than 32 output tokens', 'missing-decode-window': 'missing decode duration', 'invalid-decode-window': 'invalid decode duration', 'insufficient-decode-window': 'decode window below 200 ms', 'high-outlier': 'legacy high-outlier flag; retest with scoring v2', 'high-capped': 'raw high TPS retained; only its scoring value is capped, not a request failure', 'low-tail': 'slow sample retained in scoring' },
       forget: 'Clear and restore system DNS',
       probedAgo: 'measured {age} ago',
       never: 'never',
@@ -163,7 +186,7 @@ window.__ModuleLoader__.load({
       autoApplyTitle: '测速成功后应用推荐地址；失败保留当前地址。',
       speedTest: '自动测速',
       speedTestHint:
-        '先发现可用地址，再按 ping 从低到高选取不超过上限的 IP（默认全部）并发测速；入选 IP 同样测量（默认 3 次），综合保守速度、波动和有效样本率评分。',
+        '先发现地址，优先为上次已选 IP 保留一个测速名额，其余按 ping 从低到高选取（默认全部），按轮次测速（默认 3 轮）；综合封顶调和速度、低四分位速度、实际成功率和测量可信度评分，跳过的请求不算失败。',
       maxBenchmarkIps: '最大测速 IP 数',
       benchmarkIpLimitAll: '全部',
       benchmarkIpLimitCustom: '任意（自定义）',
@@ -174,7 +197,7 @@ window.__ModuleLoader__.load({
       benchmarkCostLimitSummary: '{count} 个最多约{compactTotal} token',
       benchmarkCostDetails: 'Token 预算详情',
       benchmarkCostHint: '按 {count} 个有效 IP × 每 IP {runs} 次 × 每次最多 {tokens} 输出 token 估算：约 {total} 输出 token 预算，另计输入 token。实际消耗取决于有效 IP 数和输出长度。',
-      benchmarkCostAllHint: '“全部”以额外扫描上限 {count} 个 IP 为例；DNS 返回的地址不计入扫描上限，实际 IP 数可能更多。',
+      benchmarkCostAllHint: '“全部”以额外扫描上限 {count} 个 IP 为例；DNS 返回地址和上次已选 IP 不计入扫描上限，实际 IP 数可能更多。',
       stepProbe: '正在发现可用地址',
       stepBenchmark: '正在测速',
       stepConfirm: '正在多轮复测',
@@ -215,22 +238,45 @@ window.__ModuleLoader__.load({
       defaultChangedHint: 'DSH 默认供应商或模型已改变，已保留测试样本，但未应用地址。',
       recommended: '推荐地址',
       systemDns: '系统 DNS',
-      resultHint: '按稳健得分降序排列。⚠ 表示存疑样本，原值保留；少于 2 次可靠样本不会被推荐。',
-      score: '稳健得分',
-      scoreHint: '得分 = Q25 ÷ (1 + IQR/中位数) × 有效样本率²。越高越好；这是保守策略，不是统计置信区间。',
+      resultHint: '优先按 v2 综合分排名；暂列分需至少 2 次可信样本才可推荐。⚠ 保留原始 TPS，高值仅封顶而非失败；跳过节点视为淘汰，旧记录需重测。',
+      score: '综合得分',
+      scoreHint: '得分 = 100 ×（80% 封顶调和 TPS + 20% 封顶 Q25）÷ 各节点调和 TPS 中位数 × 实际成功率² × 测量可信度。可信度 = 可信样本/成功请求 × min(1, 可信样本数/2)。未测、跳过、取消均不是失败。',
+      provisional: '暂列',
+      confirmed: '已确认',
+      eliminated: '淘汰 / 已跳过',
+      legacyRecord: '旧记录，需重测',
+      incompleteRetest: '未完整复测，此结果尚未确认。',
+      appliedIncompleteHint: '已手动应用尚未完整复测的地址；此结果尚未确认。',
+      appliedLegacyHint: '已手动应用旧记录地址，请使用 v2 评分重新测速后再作判断。',
+      noRecommendationHint: '测试完成，可信证据不足以推荐；当前地址未改变。',
+      measured: '已测',
+      skipped: '跳过',
+      budget: '计划',
+      round: '轮次',
+      leading: '可信暂列',
+      successfulSamples: '成功',
+      failedSamples: '失败',
+      measurementConfidence: '测量可信度',
+      scoreUncalibrated: '暂未完成校准',
+      scoreReference: '全场共同速度基准',
+      scoreCap: '全场共同速度上限',
+      scoreUncapped: '未封顶',
+      scoredTps: '评分使用 TPS',
+      timeoutBudget: '超时预算',
       stop: '停止测试',
       stopping: '正在停止…',
       stopped: '已停止',
       stoppedHint: '已停止，已完成的样本已保留；当前地址未改变。',
       stoppingHint: '正在取消在途请求，并保存已完成的样本…',
       sampleMissing: '未测',
+      sampleSkipped: '跳过',
       sampleStopped: '停止',
       sampleFailed: '失败',
       sampleUnmeasurable: '不可测',
       sampleLegacy: '逐次值未记录，需重新测速',
       samplesInsufficient: '可靠样本不足',
       reliableSamples: '可靠',
-      sampleReasons: { 'transport-error': '请求失败', cancelled: '已取消', unmeasurable: '用量或计时无效', 'insufficient-tokens': '输出不足 32 token', 'missing-decode-window': '缺少出词时长', 'invalid-decode-window': '出词时长无效', 'insufficient-decode-window': '出词计时不足 200 毫秒', 'high-outlier': '超过典型 TPS 的 4 倍，不参与评分', 'low-tail': '低速样本，仍计入波动和评分' },
+      sampleReasons: { 'transport-error': '请求失败', cancelled: '已取消', unmeasurable: '用量或计时无效', 'insufficient-tokens': '输出不足 32 token', 'missing-decode-window': '缺少出词时长', 'invalid-decode-window': '出词时长无效', 'insufficient-decode-window': '出词计时不足 200 毫秒', 'high-outlier': '旧版高值异常标记，请使用 v2 重测', 'high-capped': '原始高 TPS 保留，仅评分值封顶，不是请求失败', 'low-tail': '低速样本，仍计入评分' },
       forget: '清除并恢复系统 DNS',
       probedAgo: '{age}前测量',
       never: '从未',
@@ -510,6 +556,10 @@ window.__ModuleLoader__.load({
     /** Human-readable, specific progress line from the server's live snapshot. */
     function describeProgress(progress, t) {
       if (progress === null || progress === undefined) return t('stepProbe')
+      const budget = `${progress.timing ?? 0} ${t('measured')} + ${progress.skipped ?? 0} ${t('skipped')} / ${progress.timingTotal ?? 0} ${t('budget')}`
+      const round = progress.round > 0 && progress.rounds > 0 ? ` · ${t('round')} ${progress.round}/${progress.rounds}` : ''
+      const leading = progress.leading ? ` · ${t('leading')}: ${progress.leading}` : ''
+      const timing = ` · ${budget}${round}`
       switch (progress.stage) {
         case 'discover':
           return `${t('stepProbe')} · ${t('resolversDone')} ${progress.resolversDone ?? 0}/${progress.resolvers ?? 0}`
@@ -517,15 +567,15 @@ window.__ModuleLoader__.load({
         case 'scan':
           return `${t('stepProbe')} · ${progress.attempted ?? 0}/${progress.total ?? 0} ${t('probed')} · ${progress.usable ?? 0} ${t('usable')}`
         case 'timing':
-          return `${t('stepBenchmark')} · ${progress.timing ?? 0}/${progress.timingTotal ?? 0}`
+          return `${t('stepBenchmark')}${timing}${leading}`
         case 'confirm':
-          return `${t('stepConfirm')} · ${(progress.rows ?? []).length} ${t('addresses')} · ${progress.timing ?? 0}/${progress.timingTotal ?? 0}`
+          return `${t('stepConfirm')} · ${(progress.rows ?? []).length} ${t('addresses')}${timing}${leading}`
         case 'stopping':
-          return t('stopping')
+          return `${t('stopping')}${progress.timingTotal !== undefined ? timing : ''}`
         case 'stopped':
-          return t('stopped')
+          return `${t('stopped')}${progress.timingTotal !== undefined ? timing : ''}`
         case 'done':
-          return t('stepDone')
+          return `${t('stepDone')}${progress.timingTotal !== undefined ? timing : ''}`
         case 'failed':
           return progress.message ?? t('stepFailed')
         default:
@@ -541,46 +591,30 @@ window.__ModuleLoader__.load({
       return [failure, outcome?.saveError].filter(Boolean).join('\n') || null
     }
 
-    /**
-     * Addresses as rows, their runs as columns.
-     *
-     * A sweep produces one run per address, the confirm phase produces several
-     * per address; laying runs out horizontally keeps both readable and makes
-     * "same address, second attempt" obvious at a glance.
-     *
-     * Only TPS is shown here. The choice this table supports is which address
-     * streams fastest, and TTFT next to it crowded the row without changing any
-     * decision — the measured column is the one worth the width.
-     */
+    /** Rows arrive in the server's round-end rank order; never reshuffle them mid-round. */
     function RunsTable({ progress, t }) {
       const rows = Array.isArray(progress?.rows) ? progress.rows : []
       if (rows.length === 0) return null
-      const width = Math.max(1, ...rows.map((row) => (Array.isArray(row.runs) ? row.runs.length : 0)))
-      const columns = []
-      for (let index = 0; index < width; index++) columns.push(index)
-      return h(
-        'div',
-        { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
-        h('div', { style: { ...S.mono, ...S.muted, display: 'flex', gap: 12 } },
-          h('span', { style: { minWidth: 132 } }, ''),
-          columns.map((index) => h('span', { key: index, style: { minWidth: 118 } }, `${t('run')}${index + 1}`)),
-        ),
-        rows.map((row) =>
-          h('div', { key: row.ip, style: { ...S.mono, display: 'flex', gap: 12, alignItems: 'baseline' } },
-            h('span', { style: { minWidth: 132 } }, `${row.ip}${row.colo ? ` ${row.colo}` : ''}`),
-            columns.map((index) => {
-              const run = Array.isArray(row.runs) ? row.runs[index] : undefined
-              return h(
-                'span',
-                { key: index, style: { minWidth: 118, ...S.muted } },
-                run === undefined
-                  ? '…'
-                  : run.error !== undefined && run.error !== null
-                    ? h('span', { style: { color: 'var(--dsw-alias-state-error-primary)' } }, `✗ ${String(run.error).slice(0, 40)}`)
-                    : `${run.tps === null || run.tps === undefined ? '-' : run.tps} t/s`,
-              )
-            }),
-          ),
+      const width = Math.max(1, progress.rounds ?? 0, ...rows.map((row) => Math.max(row.summary?.plannedRuns ?? 0, Array.isArray(row.runs) ? row.runs.length : 0)))
+      const columns = Array.from({ length: width }, (_, index) => index)
+      return h('div', { style: { width: '100%', minWidth: 0, overflowX: 'auto' } },
+        h('table', { style: { width: '100%', minWidth: 280 + width * 104, borderCollapse: 'separate', borderSpacing: 0, fontSize: 12 } },
+          h('thead', null, h('tr', null,
+            h('th', { scope: 'col', style: S.th }, t('ipAndEdge')),
+            h('th', { scope: 'col', style: S.th, title: t('scoreHint') }, t('score')),
+            columns.map((index) => h('th', { key: index, scope: 'col', style: S.th }, `${t('run')}${index + 1}`)),
+          )),
+          h('tbody', null, rows.map((row, index) => {
+            // Old live snapshots can still display real attempts, but never gain a v2 score.
+            const summary = { ...row.summary, samples: Array.isArray(row.summary?.samples) ? row.summary.samples : row.runs ?? [], plannedRuns: Math.max(width, row.summary?.plannedRuns ?? 0) }
+            const values = sampleValues(summary, t).slice(1, -1).split(', ')
+            const details = sampleDetails(summary, t).split('\n')
+            return h('tr', { key: row.ip },
+              h('td', { style: { ...S.td, ...S.mono } }, `${row.rank ?? index + 1}. ${row.ip}${row.colo ? ` ${row.colo}` : ''}`),
+              h('td', { style: S.td }, h(ResultScore, { bench: row.summary, t })),
+              columns.map((column) => h('td', { key: column, title: details[column], style: { ...S.td, ...S.mono, ...S.muted } }, values[column] ?? t('sampleMissing'))),
+            )
+          })),
         ),
       )
     }
@@ -622,23 +656,48 @@ window.__ModuleLoader__.load({
     function orderedCandidates(candidates, benchmarks) {
       const group = (entry) => {
         const bench = benchmarks?.[entry.ip]
-        if (bench?.rankEligible && bench.scoringVersion === 1 && Number.isFinite(bench.stabilityScore)) return 0
-        if (Array.isArray(bench?.samples) && bench.samples.length > 0) return 1
-        if (Number.isFinite(bench?.tps)) return 2
-        return 3
+        const sampled = Array.isArray(bench?.samples) && bench.samples.length > 0
+        if (bench?.scoringVersion === 2 && !bench.historical) {
+          if (bench.eliminated) return 2
+          if (Number.isFinite(bench.stabilityScore) && bench.stabilityScore > 0) return 0
+          return sampled ? 1 : 4
+        }
+        return sampled || Number.isFinite(bench?.tps) ? 3 : 4
       }
+      const value = (candidate, key, fallback = 0) => {
+        const bench = benchmarks?.[candidate.ip]
+        return bench?.scoringVersion === 2 && !bench.historical && Number.isFinite(bench[key]) ? bench[key] : fallback
+      }
+      const rtt = (candidate) => Number.isFinite(candidate.rtt) ? candidate.rtt : Infinity
+      // Keep this tuple identical to the server. Old scores, including another v2 cohort, are incomparable.
       return [...(candidates ?? [])].sort((a, b) => group(a) - group(b) ||
-        ((benchmarks?.[b.ip]?.stabilityScore ?? -1) - (benchmarks?.[a.ip]?.stabilityScore ?? -1)) ||
-        (a.rtt ?? Infinity) - (b.rtt ?? Infinity) || String(a.ip).localeCompare(String(b.ip)))
+        value(b, 'stabilityScore') - value(a, 'stabilityScore') ||
+        value(b, 'reliableRuns') - value(a, 'reliableRuns') ||
+        value(b, 'effectiveTps') - value(a, 'effectiveTps') ||
+        value(b, 'conservativeTps') - value(a, 'conservativeTps') ||
+        value(a, 'ttftMs', Infinity) - value(b, 'ttftMs', Infinity) ||
+        rtt(a) - rtt(b) || String(a.ip).localeCompare(String(b.ip)))
+    }
+
+    // Skipped slots are display-only: samples continue to mean real attempts in their original order.
+    function sampleSlots(bench) {
+      if (!Array.isArray(bench?.samples)) return null
+      const skipped = Number.isSafeInteger(bench.skippedRuns) && bench.skippedRuns > 0 ? bench.skippedRuns : 0
+      const pending = Number.isSafeInteger(bench.pendingRuns) && bench.pendingRuns > 0 ? bench.pendingRuns : 0
+      const planned = Number.isSafeInteger(bench.plannedRuns) && bench.plannedRuns > 0 ? bench.plannedRuns : 0
+      const count = Math.max(bench.samples.length + skipped + pending, planned)
+      return Array.from({ length: count }, (_, index) => ({
+        sample: bench.samples[index],
+        missing: index >= bench.samples.length && index < bench.samples.length + skipped ? 'sampleSkipped' : 'sampleMissing',
+      }))
     }
 
     function sampleValues(bench, t) {
-      if (!Array.isArray(bench?.samples)) return t('sampleLegacy')
-      const count = Math.max(bench.samples.length, bench.plannedRuns ?? 0)
-      const values = Array.from({ length: count }, (_, index) => {
-        const sample = bench.samples[index]
-        if (!sample) return t('sampleMissing')
-        if (sample.cancelled) return t('sampleStopped')
+      const slots = sampleSlots(bench)
+      if (slots === null) return t('sampleLegacy')
+      const values = slots.map(({ sample, missing }) => {
+        if (!sample) return t(missing)
+        if (sample.cancelled || sample.error === 'test stopped') return t('sampleStopped')
         if (Number.isFinite(sample.tps)) return `${sample.tps.toFixed(1)}${sample.flags?.length ? '⚠' : ''}`
         return sample.error ? t('sampleFailed') : t('sampleUnmeasurable')
       })
@@ -646,15 +705,22 @@ window.__ModuleLoader__.load({
     }
 
     function sampleDetails(bench, t) {
-      if (!Array.isArray(bench?.samples)) return t('sampleLegacy')
-      return bench.samples.map((sample, index) => {
+      const slots = sampleSlots(bench)
+      if (slots === null) return t('sampleLegacy')
+      return slots.map(({ sample, missing }, index) => {
+        const label = `${t('run')}${index + 1}: `
+        if (!sample) return `${label}${t(missing)}${missing === 'sampleSkipped' && bench.skippedReason ? `; ${bench.skippedReason}` : ''}`
         const flags = (sample.flags ?? []).map((flag) => t(`sampleReasons.${flag}`)).join('; ')
-        return `${t('run')}${index + 1}: ${sample.tps ?? '-'} TPS; ${sample.outputTokens ?? '-'} tokens; ${sample.decodeMs ?? '-'} ms${flags ? `; ${flags}` : ''}`
+        const state = sample.cancelled || sample.error === 'test stopped' ? `${t('sampleStopped')}; ` : sample.error ? `${t('sampleFailed')}; ` : ''
+        const scored = Number.isFinite(sample.scoredTps) ? `; ${t('scoredTps')}: ${sample.scoredTps}` : ''
+        const timeout = Number.isFinite(sample.timeoutMs) && sample.timeoutMs > 0 ? `; ${t('timeoutBudget')}: ${sample.timeoutMs} ms` : ''
+        return `${label}${state}${sample.tps ?? '-'} TPS; ${sample.outputTokens ?? '-'} tokens; ${sample.decodeMs ?? '-'} ms${scored}${timeout}${flags ? `; ${flags}` : ''}`
       }).join('\n')
     }
 
     function SampleBadges({ bench, t }) {
       if (!Array.isArray(bench?.samples)) return h('div', { style: { ...S.muted, whiteSpace: 'normal' } }, t('sampleLegacy'))
+      if (sampleSlots(bench).length === 0) return null
       const labels = sampleValues(bench, t).slice(1, -1).split(', ')
       const details = sampleDetails(bench, t).split('\n')
       return h('div', { style: S.sampleBadges, 'aria-label': t('samplesLabel') },
@@ -676,12 +742,14 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function ResultApply({ ip, selected, disabled, onChoose, label, t }) {
+    function ResultApply({ ip, selected, disabled, onChoose, label, bench, t }) {
       if (selected) return h('span', { style: { ...S.muted, display: 'block', textAlign: 'center', padding: '7px 0' } }, `✓ ${t('inUse')}`)
+      const warning = bench?.scoringVersion === 2 && !bench.historical ? bench.confirmed !== true ? t('incompleteRetest') : ''
+        : bench && ((bench.samples?.length ?? 0) > 0 || Number.isFinite(bench.tps) || Number.isFinite(bench.stabilityScore)) ? t('legacyRecord') : ''
       return h('button', {
         type: 'button', className: 'dsh-best-ip-result-apply',
         style: { ...S.btn, ...S.resultApply }, disabled,
-        title: `${label ?? t('use')}: ${ip}`, 'aria-label': `${label ?? t('use')}: ${ip}`,
+        title: `${label ?? t('use')}: ${ip}${warning ? ` · ${warning}` : ''}`, 'aria-label': `${label ?? t('use')}: ${ip}`,
         onClick: () => onChoose(ip),
       }, label ?? t('use'))
     }
@@ -695,19 +763,38 @@ window.__ModuleLoader__.load({
     }
 
     function ResultScore({ bench, t }) {
-      return h('div', { style: S.resultMetric, title: t('scoreHint') },
-        h('div', { style: { fontWeight: 600, fontVariantNumeric: 'tabular-nums' } }, bench?.rankEligible && Number.isFinite(bench.stabilityScore) ? bench.stabilityScore.toFixed(1) : '—'),
-        bench?.scoringVersion === 1 ? h('div', { style: { ...S.muted, fontSize: 11 } }, `${bench.reliableRuns ?? 0}/${bench.plannedRuns ?? bench.runs ?? 0} ${t('reliableSamples')}`) : null,
-        (bench?.samples?.length ?? 0) > 0 && bench?.rankEligible === false ? h('div', { style: { ...S.muted, fontSize: 11 } }, t('samplesInsufficient')) : null,
+      const samples = Array.isArray(bench?.samples) ? bench.samples : []
+      const measured = samples.length > 0 || (bench?.runs ?? 0) > 0 || Number.isFinite(bench?.tps) || Number.isFinite(bench?.stabilityScore)
+      const v2 = bench?.scoringVersion === 2 && !bench.historical
+      const eliminated = v2 && (bench.eliminated === true || bench.skippedRuns > 0)
+      const status = !v2 ? measured ? 'legacyRecord' : 'untested'
+        : eliminated ? 'eliminated' : bench.confirmed === true && bench.rankEligible === true ? 'confirmed' : measured ? 'provisional' : 'untested'
+      const successful = bench?.successfulRuns ?? (samples.length > 0
+        ? samples.filter((sample) => sample && !sample.cancelled && !sample.error).length
+        : Math.max(0, (bench?.runs ?? 0) - (bench?.failed ?? 0) - (bench?.cancelled ?? 0)))
+      const failed = bench?.failed ?? samples.filter((sample) => sample && !sample.cancelled && sample.error && sample.error !== 'test stopped').length
+      const confidence = Number.isFinite(bench?.measurementConfidence) ? `\n${t('measurementConfidence')}: ${(bench.measurementConfidence * 100).toFixed(0)}%` : ''
+      const context = v2 ? bench.scoreContext : undefined
+      const shared = context ? `\n${t('scoreReference')}: ${context.speedReference} TPS\n${t('scoreCap')}: ${Number.isFinite(context.speedCap) ? `${context.speedCap} TPS` : t('scoreUncapped')}` : ''
+      const calibration = context?.calibrated === false ? `\n${t('scoreUncalibrated')}` : ''
+      return h('div', { style: S.resultMetric, title: `${v2 ? t('scoreHint') : t('legacyRecord')}${shared}${confidence}${calibration}` },
+        // A single trustworthy run has a useful provisional score even though it cannot be recommended yet.
+        h('div', { style: { fontWeight: 600, fontVariantNumeric: 'tabular-nums' } }, Number.isFinite(bench?.stabilityScore) ? bench.stabilityScore.toFixed(1) : '—'),
+        h('div', { style: { ...S.muted, fontSize: 11 } }, t(status)),
+        measured || eliminated ? h('div', { style: { ...S.muted, fontSize: 11 } }, `${successful} ${t('successfulSamples')} · ${failed} ${t('failedSamples')} · ${bench?.reliableRuns ?? 0} ${t('reliableSamples')}`) : null,
+        v2 && measured && (bench.reliableRuns ?? 0) < 2 ? h('div', { style: { ...S.muted, fontSize: 11 } }, t('samplesInsufficient')) : null,
       )
     }
 
     function ResultTiming({ row, bench, t }) {
-      const attempted = Array.isArray(bench?.samples) ? bench.samples.length : bench?.runs ?? 0
-      const failed = attempted > 0 && (bench.error !== undefined || bench.eligible === false)
+      const samples = Array.isArray(bench?.samples) ? bench.samples : []
+      const attempted = samples.length || bench?.runs || 0
+      const cancelled = (bench?.cancelled ?? 0) > 0 || samples.some((sample) => sample?.cancelled || sample?.error === 'test stopped')
+      const failed = attempted > 0 && ((bench?.failed ?? 0) > 0 || samples.some((sample) => sample?.error && !sample.cancelled && sample.error !== 'test stopped') ||
+        (!cancelled && (bench?.error !== undefined || bench?.eligible === false)))
       return h('div', { style: S.resultMetric },
         h('div', { style: S.muted }, `${t('ping')}: ${Number.isFinite(row.rtt) ? `${row.rtt} ms` : '—'}`),
-        h('div', { style: S.muted }, `${t('ttft')}: ${Number.isFinite(bench?.ttftMs) ? `${bench.ttftMs} ms` : failed ? t('unusable') : t('untested')}`),
+        h('div', { style: S.muted }, `${t('ttft')}: ${Number.isFinite(bench?.ttftMs) ? `${bench.ttftMs} ms` : failed ? t('unusable') : cancelled ? t('sampleStopped') : t('untested')}`),
       )
     }
 
@@ -866,7 +953,7 @@ window.__ModuleLoader__.load({
           if (runError) setError(runError)
           if (final?.stage === 'stopped') setNote(t('stoppedHint'))
           if (final?.stage === 'done') {
-            setNote(final.defaultChanged ? t('defaultChangedHint') : final.applied ? t('applies') : t('previewDone').replace('{ip}', final.recommended ?? '-'))
+            setNote(final.defaultChanged ? t('defaultChangedHint') : final.applied ? t('applies') : final.recommended ? t('previewDone').replace('{ip}', final.recommended) : t('noRecommendationHint'))
           }
         } catch (problem) {
           setError(problem?.message ?? String(problem))
@@ -956,9 +1043,11 @@ window.__ModuleLoader__.load({
         setError(null)
         try {
           const result = await call('/select', { host: measurement.hostname, provider: selection.provider, ip, testOnly: false })
-          if (result.result?.saveError) setError(result.result.saveError)
           await load()
-          setNote(null)
+          if (result.result?.saveError) setError(result.result.saveError)
+          const bench = measurement.benchmarks?.[ip]
+          setNote(bench?.scoringVersion === 2 && !bench.historical ? bench.confirmed !== true ? t('appliedIncompleteHint') : null
+            : bench && ((bench.samples?.length ?? 0) > 0 || Number.isFinite(bench.tps) || Number.isFinite(bench.stabilityScore)) ? t('appliedLegacyHint') : null)
         } catch (problem) {
           setError(problem?.message ?? String(problem))
         }
@@ -985,7 +1074,9 @@ window.__ModuleLoader__.load({
       const benchmarkCost = benchmarkIpLimitInvalid ? null : describeBenchmarkCost(state, draft.maxBenchmarkIps, t)
       const benchmarked = measurement?.benchmarks ?? {}
       const sortedRows = orderedCandidates(measurement?.candidates, benchmarked)
-      const bestIp = sortedRows.find((row) => benchmarked[row.ip]?.rankEligible === true)?.ip
+      const recommendedIp = sortedRows.some((row) => row.ip === measurement?.recommended && benchmarked[row.ip]?.scoringVersion === 2 && !benchmarked[row.ip]?.historical &&
+        benchmarked[row.ip]?.rankEligible === true && !benchmarked[row.ip]?.eliminated && Number.isFinite(benchmarked[row.ip]?.stabilityScore) && benchmarked[row.ip].stabilityScore > 0)
+        ? measurement.recommended : undefined
 
       const statItems = [
         ['statPinned', state.pinned],
@@ -1187,9 +1278,9 @@ window.__ModuleLoader__.load({
                  h('div', { style: { ...S.chips, minWidth: 0 } },
                    h('span', { style: { ...S.chip, ...S.mono, whiteSpace: 'normal', overflowWrap: 'anywhere' } }, measurement.hostname),
                    h('span', { style: { ...S.chip, ...S.mono, whiteSpace: 'normal', overflowWrap: 'anywhere' } }, `${t('inUse')}: ${measurement.activeAddress ?? t('systemDns')}`),
-                   measurement.recommended ? h('span', { style: { ...S.chip, ...S.mono, whiteSpace: 'normal', overflowWrap: 'anywhere' } }, `${t('recommended')}: ${measurement.recommended}`) : null,
-                   measurement.recommended && measurement.recommended !== measurement.activeAddress && sortedRows.some((row) => row.ip === measurement.recommended)
-                     ? h('div', { style: { width: 148, maxWidth: '100%' } }, h(ResultApply, { ip: measurement.recommended, disabled: busy || timing || running !== null || benchmarkBlocked, onChoose: choose, label: t('applyRecommended'), t }))
+                   recommendedIp ? h('span', { style: { ...S.chip, ...S.mono, whiteSpace: 'normal', overflowWrap: 'anywhere' } }, `${t('recommended')}: ${recommendedIp}`) : null,
+                   recommendedIp && recommendedIp !== measurement.activeAddress
+                     ? h('div', { style: { width: 148, maxWidth: '100%' } }, h(ResultApply, { ip: recommendedIp, bench: benchmarked[recommendedIp], disabled: busy || timing || running !== null || benchmarkBlocked, onChoose: choose, label: t('applyRecommended'), t }))
                      : null,
                  ),
                  // Persisted empty results need a message even after reopening the page.
@@ -1211,13 +1302,13 @@ window.__ModuleLoader__.load({
                      h('tbody', null, sortedRows.map((row) => {
                        const bench = benchmarked[row.ip]
                        const selected = measurement.activeAddress === row.ip
-                       const recommended = bench?.rankEligible === true && row.ip === bestIp
+                       const recommended = row.ip === recommendedIp
                        return h('tr', { key: row.ip },
                          h('td', { style: { ...S.td, ...S.resultIdentity } }, h(ResultIdentity, { row, selected, recommended, t })),
                          h('td', { style: S.td }, h(ResultSpeed, { bench, t })),
                          h('td', { style: { ...S.td, ...(recommended ? S.best : {}) } }, h(ResultScore, { bench, t })),
                          h('td', { style: S.td }, h(ResultTiming, { row, bench, t })),
-                         h('td', { style: { ...S.td, ...S.resultAction } }, h(ResultApply, { ip: row.ip, selected, disabled: busy || timing || running !== null || benchmarkBlocked, onChoose: choose, t })),
+                         h('td', { style: { ...S.td, ...S.resultAction } }, h(ResultApply, { ip: row.ip, bench, selected, disabled: busy || timing || running !== null || benchmarkBlocked, onChoose: choose, t })),
                        )
                      })),
                    ),
@@ -1225,11 +1316,11 @@ window.__ModuleLoader__.load({
                  h('div', { className: 'dsh-best-ip-results-cards', style: S.resultCards }, sortedRows.map((row) => {
                    const bench = benchmarked[row.ip]
                    const selected = measurement.activeAddress === row.ip
-                   const recommended = bench?.rankEligible === true && row.ip === bestIp
+                   const recommended = row.ip === recommendedIp
                    return h('article', { key: row.ip, style: S.resultCard, 'aria-label': row.ip },
                      h('div', { style: S.resultCardHeader },
                        h('div', { style: { flex: '1 1 auto', minWidth: 0 } }, h(ResultIdentity, { row, selected, recommended, t })),
-                       h('div', { style: { flex: '0 0 112px', maxWidth: '48%' } }, h(ResultApply, { ip: row.ip, selected, disabled: busy || timing || running !== null || benchmarkBlocked, onChoose: choose, t })),
+                       h('div', { style: { flex: '0 0 112px', maxWidth: '48%' } }, h(ResultApply, { ip: row.ip, bench, selected, disabled: busy || timing || running !== null || benchmarkBlocked, onChoose: choose, t })),
                      ),
                      h('div', { style: S.resultCardMetrics },
                        h('div', { style: S.resultMetric }, h('div', { style: S.hint }, t('medianTps')), h(ResultSpeed, { bench, t })),

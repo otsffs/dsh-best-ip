@@ -5,17 +5,17 @@ import { createResolver, normalizeConfig } from '../index.js'
 
 const host = 'api.example.test'
 const provider = { provider: 'p1', baseURL: `https://${host}/v1`, api: 'openai-completions' }
-const previousIp = '203.0.113.250'
 const candidates = Array.from({ length: 30 }, (_, index) => ({ ip: `203.0.113.${index + 1}`, rtt: 30 - index, colo: 'LAX' }))
 const orderedIps = [...candidates].reverse().map((entry) => entry.ip)
+const previousIp = orderedIps[0]
 const sample = (ip) => ({ ip, status: 200, tps: 100, outputTokens: 100, usageReported: true,
   ttftMs: 100, totalMs: 1100, decodeMs: 1000 })
 
-function fixture({ config = {}, entries = candidates, benchmarks = {}, measure, inspect } = {}) {
+function fixture({ config = {}, entries = candidates, selected = previousIp, benchmarks = {}, measure, inspect } = {}) {
   const requests = [], inspections = [], lookups = [], writes = []
   const normalized = normalizeConfig({ dnsServers: [], scanEdges: false, ...config })
   const engine = createResolver(normalized, undefined, {
-    readState: () => ({ hosts: { [host]: { hostname: host, provider: 'p1', selected: previousIp,
+    readState: () => ({ hosts: { [host]: { hostname: host, provider: 'p1', selected,
       selectedSource: 'manual', candidates: structuredClone(entries), benchmarks: structuredClone(benchmarks) } } }),
     writeState: (value) => writes.push(structuredClone(value)),
     nativePromiseLookup: async () => { lookups.push(host); return [{ address: '203.0.113.1', family: 4 }] },
@@ -49,7 +49,7 @@ for (const limit of [undefined, 0, 1, 5, 10, 20, 7, 100, Number.MAX_SAFE_INTEGER
     const expected = orderedIps.slice(0, count)
     const result = await h.engine.benchmark(host, h.options)
     assert.equal(h.requests.length, count * 3)
-    assert.deepEqual(h.requests.slice(0, count).map((entry) => entry.ip), expected, 'first round starts from the lowest ping')
+    assert.deepEqual(h.requests.slice(0, count).map((entry) => entry.ip), expected, 'first round starts from the selected address, then the lowest ping')
     assert.deepEqual([...new Set(h.requests.map((entry) => entry.ip))], expected)
     for (const ip of expected) assert.equal(h.requests.filter((entry) => entry.ip === ip).length, 3)
     assert.equal(result.candidates.length, candidates.length, 'retain all discovered IPs in the panel')
@@ -108,12 +108,13 @@ test('limit is applied after an explicit subset and sorts missing/invalid RTTs l
 })
 
 test('failed IPs consume slots and never backfill from slower candidates', async () => {
-  const h = fixture({ config: { maxBenchmarkIps: 5 }, measure: ({ ip }) => ({ ip, error: 'timeout' }) })
+  const selected = candidates[0].ip
+  const h = fixture({ config: { maxBenchmarkIps: 5 }, selected, measure: ({ ip }) => ({ ip, error: 'timeout' }) })
   const result = await h.engine.autoOptimize(host, { ...h.options, testOnly: false })
-  // This fixture discovers only one valid IP: the cap is not a target to fill.
+  // This fixture discovers only the selected IP: the cap is not a target to fill.
   assert.equal(h.requests.length, 3)
   assert.equal(result.benchmarkFailed, true)
-  assert.equal(h.engine.activeAddressFor(host), previousIp)
+  assert.equal(h.engine.activeAddressFor(host), selected)
 
   const full = fixture({ config: { maxBenchmarkIps: 5 }, measure: ({ ip }) => ({ ip, error: 'timeout' }) })
   await full.engine.benchmark(host, { ...full.options, testOnly: false })
@@ -127,7 +128,7 @@ test('a stale winner outside the budget is retained for display but cannot be re
   const previous = { ip: oldWinner, scoringVersion: 1, rankEligible: true, stabilityScore: 99999, conservativeTps: 99999, samples: [{}] }
   const h = fixture({ config: { maxBenchmarkIps: 1 }, benchmarks: { [oldWinner]: previous } })
   const result = await h.engine.benchmark(host, { ...h.options, testOnly: false })
-  assert.deepEqual(result.benchmarks[oldWinner], previous)
+  assert.deepEqual(result.benchmarks[oldWinner], { ...previous, historical: true })
   assert.equal(result.recommended, orderedIps[0])
   assert.equal(result.selected, orderedIps[0])
   assert.equal(result.applied, true)
@@ -135,7 +136,7 @@ test('a stale winner outside the budget is retained for display but cannot be re
 })
 
 test('full discovery precedes the paid cap, ignores rejected IPs and near-colo preference', async () => {
-  const h = fixture({ config: { maxBenchmarkIps: 7, scanEdges: true, preferNearEdges: true },
+  const h = fixture({ selected: candidates[0].ip, config: { maxBenchmarkIps: 7, scanEdges: true, preferNearEdges: true },
     inspect: (ips) => ips.length === 1
       ? [{ ip: ips[0], rtt: 1, colo: 'HKG' }]
       : ips.flatMap((ip, index) => index % 3 === 0 ? [] : [{ ip, rtt: index + 10, colo: index % 2 ? 'LAX' : 'HKG' }]),

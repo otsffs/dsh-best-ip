@@ -7,12 +7,13 @@ const host = 'api.example.test'
 const p1 = { provider: 'p1', baseURL: `https://${host}/v1`, api: 'openai-completions', models: ['m1'] }
 const p2 = { provider: 'p2', baseURL: 'https://other.example.test/v1', api: 'openai-completions', models: ['m2'] }
 const sample = (ip) => ({ ip, tps: 100, outputTokens: 100, usageReported: true, ttftMs: 100, totalMs: 1100, decodeMs: 1000 })
-function fixture({ measure, resolveKey, availability, canApply, lookup, inspect, editError, api = p1.api, config: overrides = {} } = {}) {
+const oldIp = '203.0.113.1'
+function fixture({ measure, resolveKey, availability, canApply, lookup, inspect, editError, selected = oldIp, api = p1.api, config: overrides = {} } = {}) {
   const routes = [], tools = [], calls = [], writes = [], edits = []
   let selection = { provider: 'p1', model: 'default-m1' }
   let config = normalizeConfig({ enabled: true, providers: ['p1', 'p2'], dnsServers: [], scanEdges: false, ...overrides })
   const engine = createResolver(config, undefined, {
-    readState: () => ({ hosts: { [host]: { hostname: host, provider: 'p1', selected: '203.0.113.9',
+    readState: () => ({ hosts: { [host]: { hostname: host, provider: 'p1', selected,
       candidates: [{ ip: '203.0.113.1', rtt: 10 }], benchmarks: {} } } }),
     writeState: (state) => writes.push(structuredClone(state)),
     nativePromiseLookup: lookup ?? (async () => [{ address: '203.0.113.1', family: 4 }]),
@@ -56,7 +57,8 @@ function fixture({ measure, resolveKey, availability, canApply, lookup, inspect,
 const tick = () => new Promise((resolve) => setImmediate(resolve))
 
 test('auto defaults to test-only and exposes recommendation rather than claiming applied', async () => {
-  const h = fixture()
+  const selected = '203.0.113.9'
+  const h = fixture({ selected, measure: async ({ ip }) => ({ ...sample(ip), tps: ip === selected ? 50 : 100 }) })
   const started = await h.invoke('auto')
   assert.equal(started.status, 202)
   assert.ok(started.value.runId)
@@ -66,11 +68,13 @@ test('auto defaults to test-only and exposes recommendation rather than claiming
   assert.equal(done.stage, 'done')
   assert.equal(done.applied, false)
   assert.equal(done.recommended, '203.0.113.1')
-  assert.equal(h.engine.selectedFor(host, 'p1'), '203.0.113.9')
+  assert.equal(h.engine.selectedFor(host, 'p1'), selected)
 })
 
 test('automatic test-and-apply explicitly applies only after successful measurement', async () => {
-  const h = fixture()
+  const selected = '203.0.113.9'
+  const h = fixture({ selected, measure: async ({ ip }) => ({ ...sample(ip), tps: ip === selected ? 50 : 100 }) })
+  assert.equal(h.engine.selectedFor(host, 'p1'), selected)
   const started = await h.invoke('auto', { testOnly: false })
   assert.equal(started.status, 202)
   await tick()
@@ -87,15 +91,16 @@ test('failed streams mark auto failed, never done/applied', async () => {
   const done = (await h.invoke('progress')).value.progress
   assert.equal(done.stage, 'failed')
   assert.equal(done.applied, false)
-  assert.equal(h.engine.selectedFor(host, 'p1'), '203.0.113.9')
+  assert.equal(h.engine.selectedFor(host, 'p1'), oldIp)
 })
 
 for (const [scenario, dependencies] of [
   ['no DNS answers', { lookup: async () => [] }],
   ['all discovered addresses rejected', { inspect: async () => [] }],
 ]) {
-  test(`${scenario} exposes a durable no-usable-IP failure without changing the pin`, async () => {
-    const h = fixture(dependencies)
+  test(`${scenario} with no saved pin exposes a durable no-usable-IP failure`, async () => {
+    const h = fixture({ ...dependencies, selected: null })
+    assert.equal(h.engine.selectedFor(host, 'p1'), undefined)
     const started = await h.invoke('auto', { testOnly: false })
     assert.equal(started.status, 202)
     await tick()
@@ -103,8 +108,8 @@ for (const [scenario, dependencies] of [
     assert.equal(done.stage, 'failed')
     assert.equal(done.reasonCode, 'NO_USABLE_IP')
     assert.equal(done.applied, false)
-    assert.equal(h.calls.length, 0, 'empty discovery must not send paid stream requests')
-    assert.equal(h.engine.selectedFor(host, 'p1'), '203.0.113.9')
+    assert.equal(h.calls.length, 0, 'empty discovery without a selected baseline must not send paid stream requests')
+    assert.equal(h.engine.selectedFor(host, 'p1'), undefined)
     h.engine.endProgress()
     const retained = (await h.invoke('progress')).value
     assert.equal(retained.progress, null)
@@ -140,7 +145,7 @@ test('stop route cancels the exact active run and retains a stopped terminal out
   const final = (await h.invoke('progress')).value.progress
   assert.equal(final.stage, 'stopped')
   assert.equal(final.applied, false)
-  assert.equal(h.engine.activeAddressFor(host), '203.0.113.9')
+  assert.equal(h.engine.activeAddressFor(host), oldIp)
   assert.equal(h.calls.length, 1)
   release(sample('203.0.113.1'))
 })
@@ -182,7 +187,7 @@ test('malformed/empty forget never erases stored choices', async () => {
   const h = fixture()
   for (const body of [{}, { host: '' }, { host: 123 }]) assert.equal((await h.invoke('forget', body)).status, 400)
   assert.equal((await h.invoke('forget', {}, {}, '{bad')).status, 400)
-  assert.equal(h.engine.selectedFor(host, 'p1'), '203.0.113.9')
+  assert.equal(h.engine.selectedFor(host, 'p1'), oldIp)
   assert.equal(h.writes.length, 0)
 })
 
@@ -200,7 +205,7 @@ test('select and forget both require explicit non-test mode', async () => {
   const h = fixture()
   assert.equal((await h.invoke('select', { host, provider: 'p1', ip: '203.0.113.1' })).ok, false)
   assert.equal((await h.invoke('forget', { host, provider: 'p1' })).status, 400)
-  assert.equal(h.engine.selectedFor(host, 'p1'), '203.0.113.9')
+  assert.equal(h.engine.selectedFor(host, 'p1'), oldIp)
 })
 
 test('benchmark rejects a provider/host mismatch before sending requests', async () => {
@@ -254,7 +259,7 @@ test('OAuth refusals happen before key resolution, probing or paid streams on ev
   assert.equal(keys, 0)
   assert.equal(h.calls.length, 0)
   assert.equal(h.writes.length, 0)
-  assert.equal(h.engine.selectedFor(host, 'p1'), '203.0.113.9')
+  assert.equal(h.engine.selectedFor(host, 'p1'), oldIp)
   assert.equal((await h.invoke('state')).value.benchmarkAvailability.reasonCode, 'OAUTH_UNSUPPORTED')
 })
 
@@ -284,13 +289,15 @@ test('manual apply rechecks the default after asynchronous auth metadata', async
   await waiting
   h.setDefault({ provider: 'p2', model: 'm2' }); release()
   assert.equal((await pending).status, 409)
-  assert.equal(h.engine.selectedFor(host, 'p1'), '203.0.113.9')
+  assert.equal(h.engine.selectedFor(host, 'p1'), oldIp)
   assert.equal(h.writes.length, 0)
 })
 
 test('a default change observed only at final commit saves samples without applying', async () => {
   let same = true
-  const h = fixture({ canApply: () => same, measure: async ({ ip }) => { same = false; return sample(ip) } })
+  const selected = '203.0.113.9'
+  const h = fixture({ selected, canApply: () => same,
+    measure: async ({ ip }) => { same = false; return { ...sample(ip), tps: ip === selected ? 50 : 100 } } })
   assert.equal((await h.invoke('auto', { testOnly: false })).status, 202)
   await tick()
   const done = (await h.invoke('progress')).value.progress
@@ -298,7 +305,7 @@ test('a default change observed only at final commit saves samples without apply
   assert.equal(done.applied, false)
   assert.equal(done.defaultChanged, true)
   assert.match(done.message, /changed/)
-  assert.equal(h.engine.selectedFor(host, 'p1'), '203.0.113.9')
+  assert.equal(h.engine.selectedFor(host, 'p1'), selected)
   assert.ok(h.writes.length > 0)
 })
 
@@ -330,13 +337,14 @@ function validate(schema, value, at = 'value') {
 }
 
 test('tool defaults are safe, use default model, and produce lossless closed-schema output', async () => {
-  const h = fixture()
+  const selected = '203.0.113.9'
+  const h = fixture({ selected, measure: async ({ ip }) => ({ ...sample(ip), tps: ip === selected ? 50 : 100 }) })
   const resolver = h.tools.find((tool) => tool.name === 'best_ip_resolve')
   assert.ok(resolver.parameters.properties.testOnly)
   const result = await resolver.execute({ host, benchmark: true, message: 'test prompt' })
   assert.equal(result.applied, false)
   assert.equal(result.recommended, '203.0.113.1')
-  assert.equal(h.engine.selectedFor(host, 'p1'), '203.0.113.9')
+  assert.equal(h.engine.selectedFor(host, 'p1'), selected)
   assert.ok(h.calls.every((call) => call.model === 'default-m1'))
   validate(resolver.output.schema, result)
   assert.deepEqual(result, JSON.parse(JSON.stringify(result)))
@@ -344,10 +352,24 @@ test('tool defaults are safe, use default model, and produce lossless closed-sch
   const state = await status.execute({})
   validate(status.output.schema, state)
   assert.deepEqual(state, JSON.parse(JSON.stringify(state)))
+  for (const row of [result.measured[0], state.measurements[0].candidates[0]]) {
+    assert.equal(row.scoringVersion, 2)
+    assert.equal(row.confirmed, true)
+    assert.equal(row.historical, false)
+    assert.equal(row.reliableRuns, 3)
+    assert.equal(row.successRate, 1)
+    assert.equal(row.measurementConfidence, 1)
+    assert.equal(row.failedRuns, 0)
+    assert.equal(row.skippedRuns, 0)
+    assert.equal(row.pendingRuns, 0)
+  }
+  assert.match(resolver.output.render({}, result)[0].text, /confirmed/)
+  assert.match(status.output.render({}, state)[0].text, /confirmed/)
 })
 
 const discoveredIps = Array.from({ length: 30 }, (_, index) => `203.0.113.${index + 1}`)
 const multiIpDiscovery = {
+  selected: discoveredIps.at(-1),
   lookup: async () => discoveredIps.map((address) => ({ address, family: 4 })),
   inspect: async (ips) => ips.map((ip) => ({ ip, rtt: 31 - Number(ip.split('.').at(-1)) })),
 }
@@ -404,6 +426,44 @@ test('benchmark route and agent resolve tool also obey the global IP limit', asy
   validate(resolver.output.schema, value)
 })
 
+test('agent surfaces label historical cohorts and omit their incomparable ranking scores', async () => {
+  const h = fixture({ ...multiIpDiscovery })
+  await h.invoke('auto'); await tick()
+  await h.invoke('auto', { maxBenchmarkIps: 1 }); await tick()
+  const status = h.tools.find((tool) => tool.name === 'best_ip_status')
+  const state = await status.execute({})
+  validate(status.output.schema, state)
+  const current = state.measurements[0].candidates[0]
+  assert.equal(current.historical, false)
+  assert.equal(current.rankEligible, true)
+  const old = state.measurements[0].candidates.find((row) => row.historical)
+  assert.equal(old.scoringVersion, 2)
+  assert.equal(old.rankEligible, false)
+  assert.equal(Object.hasOwn(old, 'stabilityScore'), false)
+  assert.equal(old.runTps.length, 3)
+  assert.match(status.output.render({}, state)[0].text, /historical; retest/)
+  const resolver = h.tools.find((tool) => tool.name === 'best_ip_resolve')
+  const result = await resolver.execute({ host })
+  validate(resolver.output.schema, result)
+  const previous = result.measured.find((row) => row.historical)
+  assert.equal(previous.rankEligible, false)
+  assert.equal(Object.hasOwn(previous, 'stabilityScore'), false)
+  assert.match(resolver.output.render({}, result)[0].text, /historical; retest/)
+})
+
+test('adaptive sampling can be saved and disabled without disabling v2 ranking', async () => {
+  const h = fixture()
+  assert.equal((await h.invoke('state')).value.adaptiveBenchmarkSampling, true)
+  const saved = await h.invoke('save', { adaptiveBenchmarkSampling: false })
+  assert.equal(saved.ok, true)
+  assert.equal(saved.value.adaptiveBenchmarkSampling, false)
+  for (const value of ['false', null, 0, 1, {}, []]) {
+    assert.equal((await h.invoke('save', { adaptiveBenchmarkSampling: value, enabled: false })).status, 400)
+  }
+  assert.equal(h.edits.length, 1)
+  assert.equal(h.engine.state().enabled, true)
+})
+
 test('invalid IP limits are refused before credentials/paid work or any config write', async () => {
   let keys = 0
   const h = fixture({ ...multiIpDiscovery, resolveKey: async () => { keys++; return 'fake-key' } })
@@ -417,6 +477,45 @@ test('invalid IP limits are refused before credentials/paid work or any config w
   assert.equal(h.edits.length, 0, 'a mixed body must not partially save other fields')
   assert.equal(keys, 0)
   assert.equal(h.engine.state().maxBenchmarkIps, 0)
+})
+
+test('benchmark timeout settings round-trip and affect automatic and current-address requests', async () => {
+  const h = fixture()
+  const initial = (await h.invoke('state')).value
+  assert.equal(initial.benchmarkTimeoutMs, 60000)
+  assert.equal(initial.adaptiveBenchmarkTimeout, true)
+  const saved = await h.invoke('save', { benchmarkTimeoutMs: 45000, adaptiveBenchmarkTimeout: false })
+  assert.equal(saved.ok, true)
+  assert.equal(saved.value.benchmarkTimeoutMs, 45000)
+  assert.equal(saved.value.adaptiveBenchmarkTimeout, false)
+  assert.equal(h.edits.at(-1).benchmarkTimeoutMs, 45000)
+  assert.equal(h.edits.at(-1).adaptiveBenchmarkTimeout, false)
+  await h.invoke('save', { maxBenchmarkIps: 7 })
+  assert.equal((await h.invoke('state')).value.benchmarkTimeoutMs, 45000, 'other edits preserve timeout settings')
+  for (const route of ['auto', 'time']) {
+    h.calls.length = 0
+    assert.equal((await h.invoke(route)).status, 202)
+    await tick()
+    assert.equal(h.calls.length, 3)
+    assert.ok(h.calls.every((call) => call.timeout === 45000))
+    assert.equal(h.engine.progress().rows[0].runs[0].timeoutMs, 45000)
+  }
+})
+
+test('invalid timeout settings cannot partially save an otherwise valid mixed body', async () => {
+  const h = fixture()
+  for (const value of [0, 999, 300001, 1000.5, '30000', null, true, [], {}, Number.MAX_SAFE_INTEGER]) {
+    const result = await h.invoke('save', { benchmarkTimeoutMs: value, enabled: false })
+    assert.equal(result.status, 400, JSON.stringify(value))
+  }
+  for (const value of ['false', 0, 1, null, [], {}]) {
+    assert.equal((await h.invoke('save', { adaptiveBenchmarkTimeout: value, enabled: false })).status, 400)
+  }
+  assert.equal(h.edits.length, 0)
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.engine.state().enabled, true)
+  assert.equal(h.engine.state().benchmarkTimeoutMs, 60000)
+  assert.equal(h.engine.state().adaptiveBenchmarkTimeout, true)
 })
 
 test('token-estimate metadata agrees with the real automatic request budget', async () => {

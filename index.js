@@ -8,12 +8,18 @@ import net from 'node:net'
 import path from 'node:path'
 
 import { inspectAll as inspectAllDefault, rankAddresses, scanCandidates, NEAR_COLOS } from './probe.js'
-import { measureStream as measureStreamDefault, summarize, supportsBenchmarkApi, sampleError } from './bench.js'
+import { measureStream as measureStreamDefault, summarize, supportsBenchmarkApi, sampleError,
+  SCORING_VERSION, buildScoringContext, optimisticScore } from './bench.js'
 import { createProviderAccess, createDefaultFollower } from './providers.js'
 import { readState as readStateDefault, writeState as writeStateDefault, statePath } from './store.js'
 
 const name = 'dsh-best-ip'
 const BENCHMARK_MAX_TOKENS = 256
+const BENCHMARK_TIMEOUT_DEFAULT_MS = 60000
+const BENCHMARK_TIMEOUT_MIN_MS = 1000
+const BENCHMARK_TIMEOUT_MAX_MS = 300000
+const MIN_HEALTHY_BENCHMARK_IPS = 3
+const HEALTHY_BENCHMARK_RATIO = 0.6
 
 /**
  * Common public resolvers shipped as the default discovery set.
@@ -145,13 +151,27 @@ const Config =
             .min(0)
             .max(Number.MAX_SAFE_INTEGER)
             .default(0)
-            .description('Maximum usable IPs to speed-test, lowest ping first. 0 tests all. Discovery and per-IP run counts are unchanged.'),
+            .description('Maximum IPs to speed-test, including the previously selected IP in one reserved slot; remaining slots use lowest ping. 0 tests all. Discovery and per-IP planned run counts are unchanged.'),
           benchmarkRuns: z
             .number()
             .min(1)
             .max(5)
             .default(3)
             .description('Streaming requests per address. The median is reported, so more runs cost more but vary less.'),
+          benchmarkTimeoutMs: z
+            .number()
+            .min(BENCHMARK_TIMEOUT_MIN_MS)
+            .max(BENCHMARK_TIMEOUT_MAX_MS)
+            .default(BENCHMARK_TIMEOUT_DEFAULT_MS)
+            .description('Whole-request speed-test deadline in milliseconds, including connection and streaming (1000–300000). Independent of DNS/probe timeouts.'),
+          adaptiveBenchmarkTimeout: z
+            .boolean()
+            .default(true)
+            .description('Shorten retries only for addresses that timed out in the previous round, when at least 3 and 60% of tested addresses produced reliable samples. Use the larger of half the base deadline and twice the healthy P90 duration, capped at the base deadline.'),
+          adaptiveBenchmarkSampling: z
+            .boolean()
+            .default(true)
+            .description('Prioritize the current leaders and skip failed final-round tails only when their capped optimistic score cannot beat a confirmed leader. Disable to measure every planned request.'),
           benchmarkMessage: z
             .string()
             .default('Count slowly from 1 to 30, one number per line.')
@@ -163,6 +183,27 @@ const Config =
 
 function isBenchmarkIpLimit(value) {
   return Number.isSafeInteger(value) && value >= 0
+}
+
+function isBenchmarkTimeout(value) {
+  return Number.isSafeInteger(value) && value >= BENCHMARK_TIMEOUT_MIN_MS && value <= BENCHMARK_TIMEOUT_MAX_MS
+}
+
+/**
+ * A completed round is the only peer evidence used for the next retry budget.
+ * Short/unmeasurable streams are not healthy peers. Use the same output workload's
+ * whole-request P90, not TPS/TTFT, so slow successful requests retain enough time.
+ * A bad round restores the base deadline; reductions never compound round by round.
+ */
+function retryBenchmarkTimeout(previousRound, baseTimeout) {
+  const healthy = previousRound.filter((run) => Number.isFinite(run?.totalMs) && run.totalMs >= 0 &&
+    summarize([run]).reliableRuns === 1)
+  if (healthy.length < MIN_HEALTHY_BENCHMARK_IPS || healthy.length / previousRound.length < HEALTHY_BENCHMARK_RATIO) {
+    return baseTimeout
+  }
+  const durations = healthy.map((run) => run.totalMs).sort((a, b) => a - b)
+  const p90 = durations[Math.ceil(durations.length * 0.9) - 1]
+  return Math.min(baseTimeout, Math.max(Math.ceil(baseTimeout / 2), Math.ceil(p90 * 2)))
 }
 
 /**
@@ -202,6 +243,9 @@ function normalizeConfig(raw) {
     maxCandidates: Math.min(4096, Math.floor(number(source.maxCandidates, 160, 1))),
     maxBenchmarkIps: isBenchmarkIpLimit(source.maxBenchmarkIps) ? source.maxBenchmarkIps : 0,
     benchmarkRuns: Math.min(5, Math.floor(number(source.benchmarkRuns, 3, 1))),
+    benchmarkTimeoutMs: isBenchmarkTimeout(source.benchmarkTimeoutMs) ? source.benchmarkTimeoutMs : BENCHMARK_TIMEOUT_DEFAULT_MS,
+    adaptiveBenchmarkTimeout: bool(source.adaptiveBenchmarkTimeout, true),
+    adaptiveBenchmarkSampling: bool(source.adaptiveBenchmarkSampling, true),
     benchmarkMessage:
       typeof source.benchmarkMessage === 'string' && source.benchmarkMessage.trim().length > 0
         ? source.benchmarkMessage.trim()
@@ -361,14 +405,28 @@ function sortAddresses(addresses) {
 function orderCandidates(candidates, benchmarks) {
   const tier = (candidate) => {
     const row = benchmarks?.[candidate.ip]
-    if (row?.rankEligible && row.scoringVersion === 1 && Number.isFinite(row.stabilityScore)) return 0
-    if (Array.isArray(row?.samples) && row.samples.length > 0) return 1
-    if (Number.isFinite(row?.tps)) return 2
-    return 3
+    if (row?.scoringVersion === SCORING_VERSION && !row.historical) {
+      if (row.eliminated) return 2
+      if (Number.isFinite(row.stabilityScore) && row.stabilityScore > 0) return 0
+      if ((row.samples?.length ?? 0) > 0) return 1
+      return 4
+    }
+    if ((row?.samples?.length ?? 0) > 0 || Number.isFinite(row?.tps)) return 3
+    return 4
   }
+  const value = (candidate, key, fallback = 0) => {
+    const row = benchmarks?.[candidate.ip]
+    return row?.scoringVersion === SCORING_VERSION && !row.historical && Number.isFinite(row[key]) ? row[key] : fallback
+  }
+  const latency = (candidate) => value(candidate, 'ttftMs', Infinity)
+  const rtt = (candidate) => Number.isFinite(candidate.rtt) ? candidate.rtt : Infinity
   return [...(candidates ?? [])].sort((a, b) => tier(a) - tier(b) ||
-    ((benchmarks?.[b.ip]?.stabilityScore ?? -1) - (benchmarks?.[a.ip]?.stabilityScore ?? -1)) ||
-    (a.rtt ?? Infinity) - (b.rtt ?? Infinity) || String(a.ip).localeCompare(String(b.ip)))
+    value(b, 'stabilityScore') - value(a, 'stabilityScore') ||
+    value(b, 'reliableRuns') - value(a, 'reliableRuns') ||
+    value(b, 'effectiveTps') - value(a, 'effectiveTps') ||
+    value(b, 'conservativeTps') - value(a, 'conservativeTps') ||
+    latency(a) - latency(b) ||
+    rtt(a) - rtt(b) || String(a.ip).localeCompare(String(b.ip)))
 }
 
 // Preserve only non-secret workload metadata, including for legacy records.
@@ -741,6 +799,13 @@ function createResolver(config, logger, dependencies = {}) {
 
   for (const [hostname, entry] of Object.entries(persisted.hosts ?? {})) {
     if (entry !== null && typeof entry === 'object' && Array.isArray(entry.candidates)) {
+      const benchmarkId = typeof entry.benchmarkId === 'string' ? entry.benchmarkId : undefined
+      const benchmarks = Object.fromEntries(Object.entries(entry.benchmarks !== null &&
+        typeof entry.benchmarks === 'object' && !Array.isArray(entry.benchmarks) ? entry.benchmarks : {}).map(([ip, row]) => [ip,
+        row?.scoringVersion === SCORING_VERSION
+          ? { ...row, historical: row.historical === true || benchmarkId === undefined || row.benchmarkId !== benchmarkId }
+          : row,
+      ]))
       storeRecord({
         ...entry,
         hostname: entry.hostname ?? hostname,
@@ -749,14 +814,16 @@ function createResolver(config, logger, dependencies = {}) {
         provider: typeof entry.provider === 'string' ? entry.provider : undefined,
         candidates: entry.candidates,
         selected: net.isIP(entry.selected ?? '') === 4 ? entry.selected : undefined,
-        recommended: entry.benchmarks?.[entry.recommended]?.scoringVersion === 1 ? entry.recommended : undefined,
+        recommended: benchmarks[entry.recommended]?.scoringVersion === SCORING_VERSION &&
+          benchmarks[entry.recommended].confirmed && !benchmarks[entry.recommended].historical &&
+          !benchmarks[entry.recommended].eliminated ? entry.recommended : undefined,
         selectedSource: typeof entry.selectedSource === 'string' ? entry.selectedSource : 'rtt',
         probedAt: typeof entry.probedAt === 'number' ? entry.probedAt : 0,
         dnsAnswers: Array.isArray(entry.dnsAnswers) ? entry.dnsAnswers : [],
         systemAnswers: Array.isArray(entry.systemAnswers) ? entry.systemAnswers : [],
         resolvers: Array.isArray(entry.resolvers) ? entry.resolvers : [],
         message: typeof entry.message === 'string' ? entry.message : undefined,
-        benchmarks: entry.benchmarks !== null && typeof entry.benchmarks === 'object' ? entry.benchmarks : {},
+        benchmarks,
       }, false)
       const migratedKey = recordKey(entry.hostname ?? hostname, entry.provider)
       if (migratedKey !== hostname) { dirtyKeys.add(migratedKey); deletedKeys.add(hostname) }
@@ -786,6 +853,7 @@ function createResolver(config, logger, dependencies = {}) {
    */
   async function probeHostname(hostname, provider, report, { commit = true, signal } = {}) {
     const previous = recordFor(hostname, provider)
+    const selected = net.isIP(previous?.selected ?? '') === 4 ? previous.selected : undefined
     stats.optimizes++
 
     // Discovery only: ask every configured server and the system resolver in
@@ -794,6 +862,17 @@ function createResolver(config, logger, dependencies = {}) {
     report?.({ stage: 'discover' })
     const discoveries = await discoverFromResolvers(hostname, report, signal)
     if (disposed) throw new Error('plugin was disposed')
+    // No fresh inspection exists yet. A stop during DNS must preserve the last
+    // snapshot, even though a saved baseline makes the initial address set nonempty.
+    if (signal?.aborted) {
+      const result = { ...previous, hostname,
+        provider: typeof provider === 'string' ? provider : provider?.provider,
+        candidates: previous?.candidates ?? [], benchmarks: previous?.benchmarks ?? {},
+        selected: previous?.selected, selectedSource: previous?.selectedSource ?? 'none',
+        stopped: true, resolvers: discoveries }
+      if (commit && !disposed) storeRecord(result)
+      return { ...result, saveError: commit && !disposed ? persist() : undefined }
+    }
     const sourcesFor = new Map()
     for (const discovery of discoveries) {
       for (const address of discovery.addresses) {
@@ -809,11 +888,12 @@ function createResolver(config, logger, dependencies = {}) {
         .filter((address, index, all) => all.indexOf(address) === index),
     )
     const systemAddresses = discoveries.find((entry) => entry.system === true)?.addresses ?? []
-    // Sorted, so the probe order (and therefore early progress reporting) does
-    // not depend on which resolver happened to answer first.
-    const initial = sortAddresses([...sourcesFor.keys()])
+    // The previously selected IP belongs to this exact provider/host. Keep it
+    // even when DNS/random edge discovery no longer returns it, and inspect it
+    // only once if a resolver also supplied it.
+    const initial = sortAddresses([...new Set([...sourcesFor.keys(), ...(selected ? [selected] : [])])])
 
-    // Nothing resolved anywhere: report it instead of scanning on a guess.
+    // Without DNS answers or an explicitly saved baseline, do not scan on a guess.
     if (initial.length === 0) {
       const result = {
         hostname,
@@ -869,6 +949,14 @@ function createResolver(config, logger, dependencies = {}) {
       if (previous === undefined || (entry.rtt ?? 1e9) < (previous.rtt ?? 1e9)) byIp.set(entry.ip, entry)
     }
 
+    // A free /models probe can fail although the actual configured streaming API
+    // works. Preserve only the explicitly selected baseline for a real-request
+    // diagnostic; measureStream still verifies the domain's TLS certificate and
+    // records failures normally. Other rejected scan/DNS addresses stay excluded.
+    if (selected && !signal?.aborted && !byIp.has(selected)) {
+      byIp.set(selected, { ip: selected, colo: 'unknown' })
+    }
+
     // Candidate ORDER here is only a starting suggestion. Ranked by RTT it can be
     // actively misleading — measured on this line, Hong Kong addresses answered
     // TCP in 51-65ms while their first token arrived at 1631-3423ms, slower than
@@ -906,8 +994,8 @@ function createResolver(config, logger, dependencies = {}) {
       // would use without the plugin.
       systemAnswers: systemAddresses,
       resolvers: discoveries,
-      // Benchmarks are kept across a re-probe when the address survives, so a
-      // re-scan does not throw away measurements that are still valid.
+      // Keep surviving raw measurements as history. Discovery is not a paid
+      // remeasurement and must not change their meaning only after a restart.
       benchmarks: pruneBenchmarks(previous?.benchmarks, candidates),
     }
     if (commit && !disposed) storeRecord(result)
@@ -921,7 +1009,8 @@ function createResolver(config, logger, dependencies = {}) {
     const keep = new Set(candidates.map((entry) => entry.ip))
     const out = {}
     for (const [ip, measurement] of Object.entries(previous ?? {})) {
-      if (keep.has(ip)) out[ip] = measurement
+      if (keep.has(ip)) out[ip] = measurement != null && typeof measurement === 'object'
+        ? { ...measurement, historical: true } : measurement
     }
     return out
   }
@@ -944,11 +1033,11 @@ function createResolver(config, logger, dependencies = {}) {
     return limit
   }
 
-  /** Rank only reliable, current-policy samples by conservative stability score. */
+  /** Formal recommendations exclude legacy, eliminated and single-sample rows. */
   function rankByStability(benchmarks) {
-    return Object.values(benchmarks ?? {})
-      .filter((entry) => entry.rankEligible === true && entry.scoringVersion === 1 && Number.isFinite(entry.stabilityScore) && entry.stabilityScore > 0)
-      .sort((a, b) => b.stabilityScore - a.stabilityScore || b.conservativeTps - a.conservativeTps || (a.ttftMs ?? Infinity) - (b.ttftMs ?? Infinity))
+    return orderCandidates(Object.values(benchmarks ?? {}).filter((entry) =>
+      entry.rankEligible === true && entry.scoringVersion === SCORING_VERSION && !entry.historical && !entry.eliminated &&
+      Number.isFinite(entry.stabilityScore) && entry.stabilityScore > 0), benchmarks)
   }
 
   /**
@@ -957,7 +1046,8 @@ function createResolver(config, logger, dependencies = {}) {
    * Discovery keeps the full usable set. Only the paid speed-test subset is
    * capped (0 = all), before workers launch, so concurrency cannot exceed the
    * address budget. Failures consume a slot too; they never trigger backfilling.
-   * Each chosen IP still receives the same number of runs.
+   * Each chosen IP has the same planned budget; final-round work can be skipped
+   * only after a confirmed leader beats a failed tail's optimistic score bound.
    *
    * `message` is the user's own test prompt: a short greeting produces too few
    * tokens for a meaningful rate, so the text is theirs to choose rather than
@@ -980,54 +1070,138 @@ function createResolver(config, logger, dependencies = {}) {
     }
     const runs = Math.min(5, Math.max(1, Math.floor(options.runs ?? 3)))
     const parallelism = Math.max(1, Math.floor(options.parallelism ?? SUBAGENT_PARALLELISM_DEFAULT))
-    const orderedTargets = byRtt(record.candidates.filter((entry) => only === undefined || only.includes(entry.ip)))
-    const targets = maxBenchmarkIps === 0 ? orderedTargets : orderedTargets.slice(0, maxBenchmarkIps)
+    const selected = net.isIP(record.selected ?? '') === 4 ? record.selected : undefined
+    const candidates = [...new Map(record.candidates.map((entry) => [entry.ip, entry])).values()]
+    // Explicit subsets remain authoritative. Otherwise the saved address is a
+    // fresh comparison target, not a stale score that can win without retesting.
+    if (selected && (only === undefined || only.includes(selected)) && !candidates.some((entry) => entry.ip === selected)) {
+      candidates.push({ ip: selected, colo: 'unknown', fromDns: false, fromSystem: false, sources: [] })
+    }
+    const orderedTargets = byRtt(candidates.filter((entry) => only === undefined || only.includes(entry.ip)))
+    const baseline = orderedTargets.find((entry) => entry.ip === selected)
+    const prioritized = baseline ? [baseline, ...orderedTargets.filter((entry) => entry.ip !== selected)] : orderedTargets
+    // The baseline occupies a slot inside a positive paid-IP cap, never an
+    // unannounced extra request budget. Remaining slots retain RTT ordering.
+    const targets = maxBenchmarkIps === 0 ? prioritized : prioritized.slice(0, maxBenchmarkIps)
+    const benchmarkId = activeRun.runId
     const raw = new Map(targets.map((entry) => [entry.ip, []]))
-    const rows = targets.map((entry) => ({ ip: entry.ip, colo: entry.colo ?? 'unknown', runs: [] }))
+    const skipped = new Map()
+    const upperBounds = new Map()
+    let scoringContext = buildScoringContext([])
+    let summaries = {}
+    let rowOrder = [...targets]
+    let roundNumber = 0
+    const baseTimeout = current.benchmarkTimeoutMs
+    let retryTimeout = baseTimeout
+    const refreshSummaries = () => {
+      summaries = Object.fromEntries(targets.map((candidate) => [candidate.ip, {
+        ...summarize(raw.get(candidate.ip), { plannedRuns: runs, scoringContext,
+          skippedRuns: skipped.get(candidate.ip) ?? 0,
+          ...(skipped.has(candidate.ip) ? { skippedReason: 'optimistic-bound' } : {}) }),
+        ip: candidate.ip, colo: candidate.colo, rtt: candidate.rtt, at: Date.now(), benchmarkId, historical: false,
+        ...(upperBounds.has(candidate.ip) ? { optimisticBound: upperBounds.get(candidate.ip) } : {}),
+      }]))
+    }
+    const publish = (rerank = false) => {
+      refreshSummaries()
+      if (rerank) rowOrder = orderCandidates(targets, summaries)
+      const leading = orderCandidates(targets, summaries).find((entry) =>
+        !summaries[entry.ip].eliminated && Number.isFinite(summaries[entry.ip].stabilityScore))?.ip
+      report?.({ stage: roundNumber <= 1 ? 'timing' : 'confirm', round: roundNumber, rounds: runs,
+        timing: [...raw.values()].reduce((sum, samples) => sum + samples.length, 0),
+        skipped: [...skipped.values()].reduce((sum, count) => sum + count, 0),
+        timingTotal: targets.length * runs, scoringContext, leading,
+        rows: rowOrder.map((candidate, index) => ({ ip: candidate.ip, colo: candidate.colo ?? 'unknown',
+          rank: index + 1, summary: summaries[candidate.ip],
+          runs: summaries[candidate.ip].samples.map((sample) => ({
+            ttftMs: sample.ttftMs, tps: sample.tps,
+            ...(sample.timeoutMs === undefined ? {} : { timeoutMs: sample.timeoutMs }),
+            ...(sample.error === null ? {} : { error: sample.error }),
+            ...(sample.cancelled ? { cancelled: true } : {}),
+          })),
+        })),
+      })
+    }
     const measure = async (candidate) => {
       if (disposed || signal?.aborted) return
+      const previousError = sampleError(raw.get(candidate.ip).at(-1))
+      const timeout = previousError === 'timeout' || previousError === 'ETIMEDOUT' ? retryTimeout : baseTimeout
       let measurement
       try {
         measurement = await abortable(measureStream({ provider, apiKey: options.apiKey, ip: candidate.ip,
-          message, model, maxTokens, timeout: 60000, signal }), signal)
+          message, model, maxTokens, timeout, signal }), signal)
       } catch (error) {
         measurement = { ip: candidate.ip, error: error?.message ?? String(error), ...(signal?.aborted ? { cancelled: true } : {}) }
       }
-      raw.get(candidate.ip).push(measurement)
-      rows.find((row) => row.ip === candidate.ip).runs.push({
-        ttftMs: measurement.ttftMs ?? null, tps: measurement.tps ?? null,
-        ...(measurement.error === undefined ? {} : { error: sampleError(measurement) }),
-        ...(measurement.cancelled ? { cancelled: true } : {}),
-      })
-      report?.({ timing: rows.reduce((n, row) => n + row.runs.length, 0), timingTotal: targets.length * runs,
-        rows: rows.map((row) => ({ ...row, runs: [...row.runs] })) })
+      // Preserve each real observation and its actual budget, never fake a failed
+      // sample for skipped work or mutate an injected/provider measurement.
+      raw.get(candidate.ip).push({ ...measurement, timeoutMs: timeout })
+      publish()
     }
-    // Equal sample counts for all selected candidates. Mixing a single lucky screening
-    // score with a leader's median biased the old final ranking.
+    const measureOrEliminate = async (candidate) => {
+      if (disposed || signal?.aborted) return
+      refreshSummaries()
+      const row = summaries[candidate.ip]
+      const incumbent = rankByStability(summaries).find((entry) => entry.confirmed)
+      // Keep successful routes and close contests under observation. Only skip
+      // failed/unmeasurable tails once a fully confirmed leader exists. Bounds
+      // share the final round's frozen cap/reference, with a 5% safety margin.
+      if (incumbent && (row.failed > 0 || row.reliableRuns === 0)) {
+        const upper = optimisticScore(raw.get(candidate.ip), { plannedRuns: runs, scoringContext })
+        if (Number.isFinite(upper) && upper < incumbent.stabilityScore * 0.95) {
+          skipped.set(candidate.ip, runs - raw.get(candidate.ip).length)
+          upperBounds.set(candidate.ip, upper)
+          publish()
+          return
+        }
+      }
+      await measure(candidate)
+    }
+    // Exploration covers the complete paid subset first. Every completed round
+    // scores all rows against one shared cohort; the next round starts at the top.
     for (let round = 0; round < runs; round++) {
       if (disposed || signal?.aborted) break
-      report?.({ stage: round === 0 ? 'timing' : 'confirm', timingTotal: targets.length * runs, rows })
-      const offset = round % Math.max(1, targets.length)
-      const ordered = [...targets.slice(offset), ...targets.slice(0, offset)]
-      await mapWithConcurrency(ordered, parallelism, measure, signal)
+      roundNumber = round + 1
+      retryTimeout = round > 0 && current.adaptiveBenchmarkTimeout
+        ? retryBenchmarkTimeout([...raw.values()].map((samples) => samples.at(-1)), baseTimeout)
+        : baseTimeout
+      publish()
+      const ordered = [...rowOrder]
+      const finalConfirmation = current.adaptiveBenchmarkSampling && round >= 2 && round === runs - 1 && scoringContext.calibrated
+      if (finalConfirmation && ordered.length > 0) {
+        // Confirm the leading route before spending the last-round budget on tails.
+        // A failed confirmation does not eliminate anyone: remaining routes recover.
+        await measure(ordered[0])
+        await mapWithConcurrency(ordered.slice(1), parallelism, measureOrEliminate, signal)
+      } else {
+        await mapWithConcurrency(ordered, parallelism, measure, signal)
+      }
+      if (!signal?.aborted && round < runs - 1) {
+        scoringContext = buildScoringContext([...raw.values()])
+      }
+      // No final-round recalibration: otherwise an earlier pruning proof would
+      // silently be evaluated under a different speed cap or reference.
+      publish(true)
     }
-    // Ranking is strictly this run + this model/prompt, never stale records or
-    // addresses outside an explicit subset.
-    const fresh = Object.fromEntries(targets.map((candidate) => [candidate.ip, {
-      ...summarize(raw.get(candidate.ip), { plannedRuns: runs }), ip: candidate.ip, colo: candidate.colo,
-      rtt: candidate.rtt, at: Date.now(), confirmed: raw.get(candidate.ip).length === runs && !raw.get(candidate.ip).some((entry) => entry.cancelled),
-    }]))
-    const best = rankByStability(fresh)[0]
-    const testOnly = options.testOnly !== false
+    refreshSummaries()
+    const fresh = summaries
     const stopped = signal?.aborted === true
+    const best = rankByStability(fresh).find((entry) => entry.confirmed)
+    const provisional = orderCandidates(targets, fresh).find((entry) =>
+      !fresh[entry.ip].eliminated && Number.isFinite(fresh[entry.ip].stabilityScore))
+    const testOnly = options.testOnly !== false
     const mayApply = typeof options.canApply !== 'function' || options.canApply() === true
     const next = {
-      ...record, stopped, benchmarks: { ...(record.benchmarks ?? {}), ...fresh },
+      ...record, candidates, stopped, benchmarkId,
+      benchmarks: { ...Object.fromEntries(Object.entries(record.benchmarks ?? {}).map(([ip, row]) =>
+        [ip, row != null && typeof row === 'object' ? { ...row, historical: true } : row])), ...fresh },
       benchmarkContext: sanitizeBenchmarkContext({ provider: provider.provider, baseURL: provider.baseURL, model, maxTokens, runs, maxBenchmarkIps }),
-      recommended: best?.ip, testOnly, applied: false,
+      recommended: best?.ip, provisionalRecommended: best === undefined ? provisional?.ip : undefined,
+      scoringContext, testOnly, applied: false,
       benchmarkFailed: !stopped && best === undefined,
+      reasonCode: !stopped && best === undefined && provisional ? 'INSUFFICIENT_RELIABLE_SAMPLES' : undefined,
       defaultChanged: !stopped && !testOnly && !mayApply,
-      message: stopped ? 'test stopped; partial results saved; current address unchanged' : best && !testOnly && !mayApply ? 'default provider or model changed; results saved without applying an address' : best === undefined ? 'no candidate produced a reliable measurable stream; previous selection kept' : undefined,
+      message: stopped ? 'test stopped; partial results saved; current address unchanged' : best && !testOnly && !mayApply ? 'default provider or model changed; results saved without applying an address' : best === undefined ? (provisional ? 'only provisional samples are available; no reliable recommendation; previous selection kept' : 'no candidate produced a reliable measurable stream; previous selection kept') : undefined,
     }
     if (best !== undefined && !testOnly && !disposed && !stopped && mayApply) {
       next.selected = best.ip
@@ -1278,16 +1452,21 @@ function createResolver(config, logger, dependencies = {}) {
       if (net.isIP(ip ?? '') !== 4) throw new Error('no current IPv4 address is available')
       if (typeof options.apiKey !== 'string' || options.apiKey.length === 0) throw new Error('no credential could be resolved for this provider')
       const runs = Math.min(5, Math.max(1, Math.floor(options.runs ?? 3)))
+      const timeout = current.benchmarkTimeoutMs
       const measurements = []
       for (let index = 0; index < runs; index++) {
         if (disposed || signal.aborted) break
         try {
-          measurements.push(await abortable(measureStream({ ...options, ip, timeout: 60000, signal }), signal))
-        } catch (error) { measurements.push({ ip, error: error?.message ?? String(error), ...(signal.aborted ? { cancelled: true } : {}) }) }
+          const measurement = await abortable(measureStream({ ...options, ip, timeout, signal }), signal)
+          measurements.push({ ...measurement, timeoutMs: timeout })
+        } catch (error) { measurements.push({ ip, error: error?.message ?? String(error), timeoutMs: timeout, ...(signal.aborted ? { cancelled: true } : {}) }) }
         report?.({ stage: 'timing', timing: index + 1, timingTotal: runs, address: ip,
-          rows: [{ ip, colo: record?.candidates.find((entry) => entry.ip === ip)?.colo ?? '',
-            runs: measurements.map((entry) => ({ ttftMs: entry.ttftMs ?? null, tps: entry.tps ?? null,
-              ...(entry.error === undefined ? {} : { error: sampleError(entry) }) })) }] })
+          rows: [{ ip, colo: record?.candidates.find((entry) => entry.ip === ip)?.colo ?? '', rank: 1,
+            summary: summarize(measurements, { plannedRuns: runs }),
+            runs: measurements.map((entry) => ({ ttftMs: entry.ttftMs ?? null, tps: entry.tps ?? null, timeoutMs: entry.timeoutMs,
+              ...(entry.error == null ? {} : { error: sampleError(entry) }),
+              ...(entry.cancelled ? { cancelled: true } : {}),
+            })) }] })
       }
       const summary = summarize(measurements, { plannedRuns: runs })
       // Current-address tests remain observational: progress keeps all samples,
@@ -1310,6 +1489,9 @@ function createResolver(config, logger, dependencies = {}) {
       extraHosts: [...current.extraHosts],
       scanEdges: current.scanEdges,
       maxBenchmarkIps: current.maxBenchmarkIps,
+      benchmarkTimeoutMs: current.benchmarkTimeoutMs,
+      adaptiveBenchmarkTimeout: current.adaptiveBenchmarkTimeout,
+      adaptiveBenchmarkSampling: current.adaptiveBenchmarkSampling,
       preferNearEdges: current.preferNearEdges,
       neighbors: [...NEAR_COLOS],
     }),
@@ -1501,6 +1683,29 @@ function apply(ctx, rawConfig, dependencies = {}) {
   })
 }
 
+const BENCHMARK_STATUS_PROPERTIES = {
+  scoringVersion: { type: 'number' }, effectiveTps: { type: 'number' },
+  reliableRuns: { type: 'number' }, successfulRuns: { type: 'number' }, failedRuns: { type: 'number' },
+  skippedRuns: { type: 'number' }, pendingRuns: { type: 'number' }, successRate: { type: 'number' },
+  measurementConfidence: { type: 'number' }, confirmed: { type: 'boolean' }, eliminated: { type: 'boolean' },
+  historical: { type: 'boolean' },
+}
+function benchmarkStatusFields(bench) {
+  const value = {}
+  for (const key of Object.keys(BENCHMARK_STATUS_PROPERTIES)) {
+    const raw = key === 'failedRuns' ? bench?.failed : bench?.[key]
+    if (BENCHMARK_STATUS_PROPERTIES[key].type === 'boolean' ? typeof raw === 'boolean' : Number.isFinite(raw)) value[key] = raw
+  }
+  return value
+}
+
+function benchmarkStatusText(row) {
+  if (row.scoringVersion === undefined) return ''
+  if (row.scoringVersion !== SCORING_VERSION || row.historical) return ' [historical; retest]'
+  const status = row.eliminated ? 'eliminated' : row.confirmed ? 'confirmed' : 'provisional'
+  return ` [${status}; reliable=${row.reliableRuns ?? 0}; failed=${row.failedRuns ?? 0}; skipped=${row.skippedRuns ?? 0}]`
+}
+
 /** Agent-facing operations: inspect state and verify resolution. */
 function registerTools(ctx, engine, refreshHosts, providers) {
   const { readProviderProfiles, resolveApiKey, readDefaultSelection, subagentParallelism, describeBenchmark = async () => ({ supported: true }), isCurrentDefault = () => true, ready } = providers
@@ -1529,6 +1734,9 @@ function registerTools(ctx, engine, refreshHosts, providers) {
               ttlSeconds: { type: 'number' },
               scanEdges: { type: 'boolean' },
               maxBenchmarkIps: { type: 'number' },
+              benchmarkTimeoutMs: { type: 'number' },
+              adaptiveBenchmarkTimeout: { type: 'boolean' },
+              adaptiveBenchmarkSampling: { type: 'boolean' },
               preferNearEdges: { type: 'boolean' },
               neighbors: { type: 'array', items: { type: 'string' } },
               run: { type: 'object', additionalProperties: false, properties: { runId: { type: 'string' }, hostname: { type: 'string' }, stage: { type: 'string' } } },
@@ -1574,6 +1782,7 @@ function registerTools(ctx, engine, refreshHosts, providers) {
                           tps: { type: 'number' },
                           stabilityScore: { type: 'number' },
                           rankEligible: { type: 'boolean' },
+                          ...BENCHMARK_STATUS_PROPERTIES,
                           runTps: { type: 'array', items: { oneOf: [{ type: 'number' }, { type: 'null' }] } },
                           outputTokens: { type: 'number' },
                           benchmarked: { type: 'boolean' },
@@ -1617,7 +1826,7 @@ function registerTools(ctx, engine, refreshHosts, providers) {
                     ? 'unusable'
                     : 'not benchmarked'
                 lines.push(
-                  `  ${candidate.ip.padEnd(16)} ${(candidate.colo ?? '?').padEnd(5)} rtt=${String(candidate.rtt ?? '?').padStart(4)}ms  ${timing}${candidate.runTps ? ` (${candidate.runTps.map((n) => n ?? '-').join(', ')})` : ''}${candidate.stabilityScore === undefined ? '' : ` score=${candidate.stabilityScore}`}`,
+                  `  ${candidate.ip.padEnd(16)} ${(candidate.colo ?? '?').padEnd(5)} rtt=${String(candidate.rtt ?? '?').padStart(4)}ms  ${timing}${candidate.runTps ? ` (${candidate.runTps.map((n) => n ?? '-').join(', ')})` : ''}${candidate.stabilityScore === undefined ? '' : ` score=${candidate.stabilityScore}`}${benchmarkStatusText(candidate)}`,
                 )
               }
             }
@@ -1660,8 +1869,9 @@ function registerTools(ctx, engine, refreshHosts, providers) {
                 rtt: candidate.rtt ?? 0,
                 ...(typeof bench?.ttftMs === 'number' ? { ttftMs: bench.ttftMs } : {}),
                 ...(Number.isFinite(bench?.tps) ? { tps: bench.tps } : {}),
-                ...(Number.isFinite(bench?.stabilityScore) ? { stabilityScore: bench.stabilityScore } : {}),
-                ...(typeof bench?.rankEligible === 'boolean' ? { rankEligible: bench.rankEligible } : {}),
+                ...(bench?.scoringVersion === SCORING_VERSION && !bench.historical && Number.isFinite(bench.stabilityScore) ? { stabilityScore: bench.stabilityScore } : {}),
+                ...(typeof bench?.rankEligible === 'boolean' ? { rankEligible: bench.scoringVersion === SCORING_VERSION && !bench.historical && !bench.eliminated && bench.rankEligible } : {}),
+                ...benchmarkStatusFields(bench),
                 ...(Array.isArray(bench?.samples) ? { runTps: bench.samples.map((sample) => Number.isFinite(sample.tps) ? sample.tps : null) } : {}),
                 ...(typeof bench?.outputTokens === 'number' ? { outputTokens: bench.outputTokens } : {}),
                 benchmarked: bench?.eligible === true && Number.isFinite(bench?.tps),
@@ -1727,6 +1937,7 @@ function registerTools(ctx, engine, refreshHosts, providers) {
                     tps: { type: 'number' },
                     stabilityScore: { type: 'number' },
                     rankEligible: { type: 'boolean' },
+                    ...BENCHMARK_STATUS_PROPERTIES,
                     runTps: { type: 'array', items: { oneOf: [{ type: 'number' }, { type: 'null' }] } },
                   },
                 },
@@ -1748,7 +1959,7 @@ function registerTools(ctx, engine, refreshHosts, providers) {
                   ? 'not benchmarked'
                   : `TTFT=${entry.ttftMs}ms TPS=${entry.tps ?? '-'}`
                 lines.push(
-                  `  ${entry.ip.padEnd(16)} ${String(entry.colo).padEnd(5)} rtt=${String(entry.rtt).padStart(4)}ms  ${timing}${entry.runTps ? ` (${entry.runTps.map((n) => n ?? '-').join(', ')})` : ''}${entry.stabilityScore === undefined ? '' : ` score=${entry.stabilityScore}`}${entry.fromDns ? '  (from DNS)' : ''}`,
+                  `  ${entry.ip.padEnd(16)} ${String(entry.colo).padEnd(5)} rtt=${String(entry.rtt).padStart(4)}ms  ${timing}${entry.runTps ? ` (${entry.runTps.map((n) => n ?? '-').join(', ')})` : ''}${entry.stabilityScore === undefined ? '' : ` score=${entry.stabilityScore}`}${benchmarkStatusText(entry)}${entry.fromDns ? '  (from DNS)' : ''}`,
                 )
               }
             }
@@ -1806,8 +2017,9 @@ function registerTools(ctx, engine, refreshHosts, providers) {
                 fromDns: addresses.includes(candidate.ip),
                 ...(typeof bench?.ttftMs === 'number' ? { ttftMs: bench.ttftMs } : {}),
                 ...(Number.isFinite(bench?.tps) ? { tps: bench.tps } : {}),
-                ...(Number.isFinite(bench?.stabilityScore) ? { stabilityScore: bench.stabilityScore } : {}),
-                ...(typeof bench?.rankEligible === 'boolean' ? { rankEligible: bench.rankEligible } : {}),
+                ...(bench?.scoringVersion === SCORING_VERSION && !bench.historical && Number.isFinite(bench.stabilityScore) ? { stabilityScore: bench.stabilityScore } : {}),
+                ...(typeof bench?.rankEligible === 'boolean' ? { rankEligible: bench.scoringVersion === SCORING_VERSION && !bench.historical && !bench.eliminated && bench.rankEligible } : {}),
+                ...benchmarkStatusFields(bench),
                 ...(Array.isArray(bench?.samples) ? { runTps: bench.samples.map((sample) => Number.isFinite(sample.tps) ? sample.tps : null) } : {}),
               }
             })
@@ -2339,6 +2551,9 @@ function registerHttpBridge(ctx, engine, refreshHosts, config, providers) {
               return writeJson(res, 400, { ok: false, message: 'malformed JSON body' })
             }
             if (body.maxBenchmarkIps !== undefined && !isBenchmarkIpLimit(body.maxBenchmarkIps)) return writeJson(res, 400, { ok: false, message: 'maxBenchmarkIps must be a non-negative safe integer (0 = all)' })
+            if (body.benchmarkTimeoutMs !== undefined && !isBenchmarkTimeout(body.benchmarkTimeoutMs)) return writeJson(res, 400, { ok: false, message: 'benchmarkTimeoutMs must be an integer from 1000 to 300000 milliseconds' })
+            if (body.adaptiveBenchmarkTimeout !== undefined && typeof body.adaptiveBenchmarkTimeout !== 'boolean') return writeJson(res, 400, { ok: false, message: 'adaptiveBenchmarkTimeout must be a boolean' })
+            if (body.adaptiveBenchmarkSampling !== undefined && typeof body.adaptiveBenchmarkSampling !== 'boolean') return writeJson(res, 400, { ok: false, message: 'adaptiveBenchmarkSampling must be a boolean' })
             const editor = ctx.get('configEditor')
             if (editor === undefined) {
               return writeJson(res, 409, { ok: false, message: 'the config editor is unavailable in this profile' })
@@ -2368,6 +2583,9 @@ function registerHttpBridge(ctx, engine, refreshHosts, config, providers) {
             if (typeof body.fallbackToSystem === 'boolean') next.fallbackToSystem = body.fallbackToSystem
             if (Number.isFinite(body.ttlSeconds)) next.ttlSeconds = body.ttlSeconds
             if (body.maxBenchmarkIps !== undefined) next.maxBenchmarkIps = body.maxBenchmarkIps
+            if (body.benchmarkTimeoutMs !== undefined) next.benchmarkTimeoutMs = body.benchmarkTimeoutMs
+            if (body.adaptiveBenchmarkTimeout !== undefined) next.adaptiveBenchmarkTimeout = body.adaptiveBenchmarkTimeout
+            if (body.adaptiveBenchmarkSampling !== undefined) next.adaptiveBenchmarkSampling = body.adaptiveBenchmarkSampling
             if (typeof body.scanEdges === 'boolean') next.scanEdges = body.scanEdges
             if (typeof body.preferNearEdges === 'boolean') next.preferNearEdges = body.preferNearEdges
             if (typeof body.benchmarkMessage === 'string' && body.benchmarkMessage.trim()) next.benchmarkMessage = body.benchmarkMessage.trim()
