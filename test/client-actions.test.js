@@ -100,6 +100,32 @@ test('apply and identity columns stay pinned above an opaque surface', () => {
   assert.match(source, /\.\.\.S\.td, \.\.\.S\.resultAction/)
 })
 
+test('live round table shares width across rounds instead of reserving a fixed offscreen column', () => {
+  const styles = resultStyles()
+  assert.equal(styles.runsTable.tableLayout, 'fixed')
+  assert.equal(styles.runsTable.minWidth, 0)
+  assert.equal(Object.hasOwn(styles.runsTable, 'minWidth') && styles.runsTable.minWidth > 0, false)
+  // Three default rounds plus identity and score must fit the 780px settings card.
+  const table = renderComponent('RunsTable', { progress: { rounds: 3, rows: [{
+    ip: '203.0.113.1', rank: 1, runs: [{ tps: 100 }, { tps: 101 }, { tps: 102 }],
+  }] } })
+  const columns = nodes(table).find((node) => node.type === 'colgroup').children
+  assert.deepEqual(columns.map((column) => column.props.style.width), ['38%', '22%', '13.333333333333334%', '13.333333333333334%', '13.333333333333334%'])
+  const header = nodes(table).find((node) => node.type === 'tr')
+  assert.equal(header.children.at(-1).children[0].children[0], 'run3')
+  for (const cell of nodes(table).filter((node) => node.type === 'td').slice(2)) assert.equal(cell.props.style.textAlign, 'right')
+})
+
+test('live round cells keep the third sample readable without a fixed 104px column', () => {
+  const table = renderComponent('RunsTable', { progress: { rounds: 3, rows: [{
+    ip: '203.0.113.1', rank: 1, runs: [{ tps: 158.4 }, { tps: 221.1 }, { tps: 326.8 }],
+  }] } })
+  const cells = nodes(table).filter((node) => node.type === 'td')
+  assert.deepEqual(cells.slice(2).map((cell) => cell.children[0]), ['158.4', '221.1', '326.8'])
+  assert.ok(cells.slice(2).every((cell) => ['7px 4px', '7px 0 7px 4px'].includes(cell.props.style.padding)))
+  assert.ok(cells.slice(2).every((cell) => cell.props.style.width === undefined))
+})
+
 test('large result sets scroll in a bounded viewport with wrapping samples', () => {
   const styles = resultStyles()
   assert.equal(styles.page.minWidth, 0)
@@ -711,7 +737,8 @@ test('live rows use complete server summaries and a shared context, preserving s
   const before = structuredClone(rows)
   const tree = renderComponent('RunsTable', { progress: { stage: 'confirm', round: 2, rounds: 3, rows, scoringContext: context } })
   const bodyRows = nodes(tree).find((node) => node.type === 'tbody').children
-  assert.deepEqual(bodyRows.map((row) => row.children[0].children[0]), ['7. node-0 TEST', '2. node-1 TEST', '9. node-2 TEST'])
+  assert.deepEqual(bodyRows.map((row) => row.children[0].children[0].children[0]), ['7. node-0', '2. node-1', '9. node-2'])
+  assert.deepEqual(bodyRows.map((row) => row.children[0].children[1]?.children[0]), ['TEST', 'TEST', 'TEST'])
   assert.equal(bodyRows[2].children[3].children[0], '10000.0⚠')
   assert.ok(bodyRows[2].children[3].props.title.includes(`TPS used for scoring: ${context.speedCap}`))
   assert.ok(!renderedText(tree).includes('999999'))
@@ -725,8 +752,7 @@ test('live rows use complete server summaries and a shared context, preserving s
   assert.deepEqual(rows, before)
 })
 
-test('live skipped slots do not look like failures and summary plans can extend the live columns', () => {
-  const summary = summarize([rawRun(100), { error: 'timeout', timeoutMs: 30000 }], { plannedRuns: 5, skippedRuns: 2, skippedReason: 'optimistic-bound' })
+test('live skipped slots do not look like failures and summary plans can extend the live columns', () => {  const summary = summarize([rawRun(100), { error: 'timeout', timeoutMs: 30000 }], { plannedRuns: 5, skippedRuns: 2, skippedReason: 'optimistic-bound' })
   const tree = renderComponent('RunsTable', { progress: { round: 3, rounds: 3, rows: [{ ip: 'tail', rank: 4, summary }] } })
   const row = nodes(tree).find((node) => node.type === 'tbody').children[0]
   assert.deepEqual(row.children.slice(2).map((cell) => cell.children[0]), ['100.0', 'failed', 'skipped', 'skipped', 'not tested'])

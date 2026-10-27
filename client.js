@@ -409,6 +409,9 @@ window.__ModuleLoader__.load({
       chips: { display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' },
       mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12 },
       table: { width: '100%', minWidth: 740, tableLayout: 'fixed', borderCollapse: 'separate', borderSpacing: 0, fontSize: 12 },
+      runsTable: { width: '100%', minWidth: 0, tableLayout: 'fixed', borderCollapse: 'separate', borderSpacing: 0, fontSize: 12 },
+      runsHead: { display: 'block', fontSize: 10, fontWeight: 400, color: 'var(--dsw-alias-label-secondary)', lineHeight: 1.35 },
+      runsCell: { padding: '7px 4px', borderBottom: '1px solid var(--dsw-alias-border-l1)', verticalAlign: 'top', minWidth: 0, fontVariantNumeric: 'tabular-nums' },
       resultsSurface: { width: '100%', minWidth: 0, containerType: 'inline-size', containerName: 'dsh-best-ip-results' },
       resultViewport: { width: '100%', minWidth: 0, maxHeight: 'min(60vh, 560px)', overflow: 'auto', position: 'relative', isolation: 'isolate', border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 9, boxSizing: 'border-box' },
       resultIdentity: { position: 'sticky', left: 0, zIndex: 2, background: 'var(--dsw-alias-bg-layer-1)', borderRight: '1px solid var(--dsw-alias-border-l1)' },
@@ -597,12 +600,21 @@ window.__ModuleLoader__.load({
       if (rows.length === 0) return null
       const width = Math.max(1, progress.rounds ?? 0, ...rows.map((row) => Math.max(row.summary?.plannedRuns ?? 0, Array.isArray(row.runs) ? row.runs.length : 0)))
       const columns = Array.from({ length: width }, (_, index) => index)
+      // Fixed columns squeezed the third round off the panel. Share the remaining
+      // width between rounds so the default three fit without sideways scrolling.
       return h('div', { style: { width: '100%', minWidth: 0, overflowX: 'auto' } },
-        h('table', { style: { width: '100%', minWidth: 280 + width * 104, borderCollapse: 'separate', borderSpacing: 0, fontSize: 12 } },
+        h('table', { style: S.runsTable },
+          h('colgroup', null,
+            h('col', { style: { width: '38%' } }),
+            h('col', { style: { width: '22%' } }),
+            columns.map((index) => h('col', { key: index, style: { width: `${40 / width}%` } })),
+          ),
           h('thead', null, h('tr', null,
-            h('th', { scope: 'col', style: S.th }, t('ipAndEdge')),
-            h('th', { scope: 'col', style: S.th, title: t('scoreHint') }, t('score')),
-            columns.map((index) => h('th', { key: index, scope: 'col', style: S.th }, `${t('run')}${index + 1}`)),
+            h('th', { scope: 'col', style: { ...S.th, padding: '6px 4px' } }, t('ipAndEdge')),
+            h('th', { scope: 'col', style: { ...S.th, padding: '6px 4px' }, title: t('scoreHint') }, t('score')),
+            columns.map((index) => h('th', { key: index, scope: 'col', style: { ...S.th, padding: '6px 4px', textAlign: 'right' } },
+              h('span', { style: { fontWeight: 500 } }, `${t('run')}${index + 1}`),
+            )),
           )),
           h('tbody', null, rows.map((row, index) => {
             // Old live snapshots can still display real attempts, but never gain a v2 score.
@@ -610,9 +622,17 @@ window.__ModuleLoader__.load({
             const values = sampleValues(summary, t).slice(1, -1).split(', ')
             const details = sampleDetails(summary, t).split('\n')
             return h('tr', { key: row.ip },
-              h('td', { style: { ...S.td, ...S.mono } }, `${row.rank ?? index + 1}. ${row.ip}${row.colo ? ` ${row.colo}` : ''}`),
-              h('td', { style: S.td }, h(ResultScore, { bench: row.summary, t })),
-              columns.map((column) => h('td', { key: column, title: details[column], style: { ...S.td, ...S.mono, ...S.muted } }, values[column] ?? t('sampleMissing'))),
+              h('td', { style: { ...S.runsCell, ...S.mono, overflowWrap: 'anywhere' } },
+                h('div', null, `${row.rank ?? index + 1}. ${row.ip}`),
+                row.colo ? h('div', { style: { ...S.muted, fontSize: 10 } }, row.colo) : null,
+              ),
+              h('td', { style: S.runsCell }, h(ResultScore, { bench: row.summary, t })),
+              columns.map((column) => h('td', {
+                key: column,
+                title: details[column],
+                style: { ...S.runsCell, ...S.mono, ...S.muted, padding: column === width - 1 ? '7px 0 7px 4px' : '7px 4px',
+                  textAlign: 'right', whiteSpace: 'normal', overflowWrap: 'anywhere' },
+              }, values[column] ?? t('sampleMissing'))),
             )
           })),
         ),
@@ -777,11 +797,12 @@ window.__ModuleLoader__.load({
       const context = v2 ? bench.scoreContext : undefined
       const shared = context ? `\n${t('scoreReference')}: ${context.speedReference} TPS\n${t('scoreCap')}: ${Number.isFinite(context.speedCap) ? `${context.speedCap} TPS` : t('scoreUncapped')}` : ''
       const calibration = context?.calibrated === false ? `\n${t('scoreUncalibrated')}` : ''
+      const counts = `${successful} ${t('successfulSamples')} · ${failed} ${t('failedSamples')} · ${bench?.reliableRuns ?? 0} ${t('reliableSamples')}`
       return h('div', { style: S.resultMetric, title: `${v2 ? t('scoreHint') : t('legacyRecord')}${shared}${confidence}${calibration}` },
         // A single trustworthy run has a useful provisional score even though it cannot be recommended yet.
-        h('div', { style: { fontWeight: 600, fontVariantNumeric: 'tabular-nums' } }, Number.isFinite(bench?.stabilityScore) ? bench.stabilityScore.toFixed(1) : '—'),
+        h('div', { style: { fontWeight: 600, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' } }, Number.isFinite(bench?.stabilityScore) ? bench.stabilityScore.toFixed(1) : '—'),
         h('div', { style: { ...S.muted, fontSize: 11 } }, t(status)),
-        measured || eliminated ? h('div', { style: { ...S.muted, fontSize: 11 } }, `${successful} ${t('successfulSamples')} · ${failed} ${t('failedSamples')} · ${bench?.reliableRuns ?? 0} ${t('reliableSamples')}`) : null,
+        measured || eliminated ? h('div', { style: { ...S.muted, fontSize: 11 } }, counts) : null,
         v2 && measured && (bench.reliableRuns ?? 0) < 2 ? h('div', { style: { ...S.muted, fontSize: 11 } }, t('samplesInsufficient')) : null,
       )
     }

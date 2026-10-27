@@ -23,7 +23,7 @@ Benchmark the current DSH default model's API IPs. Testing recommends an address
    dsh-best-ip
    ```
 
-   需要固定版本时填写实际已发布的版本号，例如 `dsh-best-ip@1.1.1`。
+   需要固定版本时填写实际已发布的版本号，例如 `dsh-best-ip@1.2.0`。
 3. 确认信任该插件，点击 **安装**，随后选择 **立即启用**。
 4. 打开 **设置 → 模型节点优选**。
 
